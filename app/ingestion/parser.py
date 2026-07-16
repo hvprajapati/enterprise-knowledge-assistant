@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-import fitz
+import fitz  # type: ignore[import-untyped]
 from docx import Document
 
 from app.ingestion.models import (
@@ -30,17 +30,14 @@ def build_metadata(file_path: Path) -> DocumentMetadata:
 
 class PDFParser(BaseParser):
     def parse(self, file_path: Path) -> ParsedDocument:
-        pdf = fitz.open(file_path)
-
-        pages = [
-            DocumentPage(
-                page_number=index + 1,
-                text=page.get_text("text"),
-            )
-            for index, page in enumerate(pdf)
-        ]
-
-        pdf.close()
+        with fitz.open(file_path) as pdf:
+            pages = [
+                DocumentPage(
+                    page_number=index + 1,
+                    text=page.get_text("text"),
+                )
+                for index, page in enumerate(pdf)
+            ]
 
         return ParsedDocument(
             pages=pages,
@@ -50,12 +47,9 @@ class PDFParser(BaseParser):
 
 class DOCXParser(BaseParser):
     def parse(self, file_path: Path) -> ParsedDocument:
-        document = Document(file_path)
+        document = Document(str(file_path))
 
-        text = "\n".join(
-            paragraph.text
-            for paragraph in document.paragraphs
-        )
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
 
         return ParsedDocument(
             pages=[

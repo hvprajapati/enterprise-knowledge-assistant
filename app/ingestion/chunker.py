@@ -44,6 +44,7 @@ class DocumentChunker:
                         chunk_index=chunk_index,
                         page_number=page.page_number,
                         text=chunk,
+                        metadata=document.metadata,
                     )
                 )
 

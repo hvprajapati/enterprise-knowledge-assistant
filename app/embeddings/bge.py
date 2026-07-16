@@ -1,11 +1,13 @@
 from sentence_transformers import SentenceTransformer
 
+from app.embeddings.base import BaseEmbeddingModel
 
-class EmbeddingService:
+
+class BGEEmbeddingModel(BaseEmbeddingModel):
+    """BAAI BGE embedding model."""
+
     def __init__(self) -> None:
-        self.model = SentenceTransformer(
-            "BAAI/bge-base-en-v1.5"
-        )
+        self.model = SentenceTransformer("BAAI/bge-base-en-v1.5")
 
     def encode(self, text: str) -> list[float]:
         embedding = self.model.encode(
@@ -13,7 +15,7 @@ class EmbeddingService:
             normalize_embeddings=True,
         )
 
-        return embedding.tolist()
+        return embedding.tolist()  # type: ignore[no-any-return]
 
     def encode_batch(
         self,
@@ -24,4 +26,4 @@ class EmbeddingService:
             normalize_embeddings=True,
         )
 
-        return embeddings.tolist()
+        return embeddings.tolist()  # type: ignore[no-any-return]

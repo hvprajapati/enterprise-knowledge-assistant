@@ -10,7 +10,7 @@ app = FastAPI(
 
 
 @app.get("/")
-async def root():
+async def root() -> dict[str, str]:
     return {"message": f"Welcome to {settings.project_name}"}
 
 

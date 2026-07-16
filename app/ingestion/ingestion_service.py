@@ -2,7 +2,7 @@ from pathlib import Path
 
 from app.ingestion.chunker import DocumentChunker
 from app.ingestion.cleaner import TextCleaner
-from app.ingestion.models import DocumentChunk
+from app.ingestion.models import DocumentChunk, DocumentPage, ParsedDocument
 from app.ingestion.parser_factory import ParserFactory
 
 
@@ -18,7 +18,17 @@ class IngestionService:
 
         document = parser.parse(file_path)
 
-        for page in document.pages:
-            page.text = self.cleaner.clean(page.text)
+        cleaned_pages = [
+            DocumentPage(
+                page_number=page.page_number,
+                text=self.cleaner.clean(page.text),
+            )
+            for page in document.pages
+        ]
 
-        return self.chunker.chunk(document)
+        cleaned_document = ParsedDocument(
+            pages=cleaned_pages,
+            metadata=document.metadata,
+        )
+
+        return self.chunker.chunk(cleaned_document)
