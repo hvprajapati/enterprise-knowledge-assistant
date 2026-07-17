@@ -19,7 +19,7 @@ class FAISSVectorStore:
         self,
         embedding: list[float],
         chunk: DocumentChunk,
-    ) -> None:
+    ) -> int:
 
         vector = np.asarray(
             [embedding],
@@ -34,6 +34,8 @@ class FAISSVectorStore:
             vector_id,
             chunk,
         )
+
+        return vector_id
 
     def search(
         self,

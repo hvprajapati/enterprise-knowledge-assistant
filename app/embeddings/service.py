@@ -8,6 +8,10 @@ class EmbeddingService:
     def __init__(self) -> None:
         self.model = BGEEmbeddingModel()
 
+    @property
+    def dimension(self) -> int:
+        return self.model.dimension
+
     def embed_chunk(
         self,
         chunk: DocumentChunk,
@@ -18,6 +22,9 @@ class EmbeddingService:
         self,
         chunks: list[DocumentChunk],
     ) -> list[list[float]]:
-        texts = [chunk.text for chunk in chunks]
+        texts = [
+            chunk.text
+            for chunk in chunks
+        ]
 
         return self.model.encode_batch(texts)
