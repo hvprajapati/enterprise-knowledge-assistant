@@ -34,6 +34,10 @@ from app.config.settings import settings
 from app.llm.base import BaseLLM
 from app.query.service import QueryService
 from app.retrieval.query_rewriter import QueryRewriter
+from app.tools import ToolExecutor, ToolRegistry
+from app.tools.calculator import CalculatorTool
+from app.tools.current_time import CurrentTimeTool
+from app.tools.document_search import DocumentSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,18 @@ class EnterpriseKnowledgeAgent:
             max_retries=settings.max_agent_retries,
         )
 
+        # -- tool calling framework ---------------------------------------
+        doc_search = DocumentSearchTool()
+        doc_search.configure(query_service)
+
+        tool_registry = ToolRegistry()
+        tool_registry.register(CalculatorTool())
+        tool_registry.register(CurrentTimeTool())
+        tool_registry.register(doc_search)
+
+        _services["tool_registry"] = tool_registry
+        _services["tool_executor"] = ToolExecutor(registry=tool_registry)
+
         self._graph = build_graph().compile()
 
     # ------------------------------------------------------------------
@@ -105,6 +121,8 @@ class EnterpriseKnowledgeAgent:
             "executed_nodes": [],
             "requires_rewrite": False,  # will be set by planner_node
             "execution_plan": {},  # will be set by planner_node
+            "tool_decision": {},  # will be set by tool_node
+            "tool_result": {},  # will be set by tool_node
             "reflection_result": {},  # will be set by reflection_node
             "validation_result": {},  # will be set by validation_node
             "retry_decision": {},  # will be set by retry_node

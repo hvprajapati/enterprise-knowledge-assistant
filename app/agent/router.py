@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 class RouteDecision(StrEnum):
     """Valid next-step destinations recognised by LangGraph."""
 
+    TOOL = "tool_node"
     REWRITE = "rewrite_node"
     RETRIEVE = "retrieve_node"
     GENERATE = "generate_node"
@@ -36,20 +37,47 @@ class RouteDecision(StrEnum):
 # ---------------------------------------------------------------------------
 
 
-def route_after_start(state: AgentState) -> str:
-    """Decide whether to rewrite the question or go straight to retrieval.
+def route_after_planner(state: AgentState) -> str:
+    """Decide whether to execute tools, rewrite, or go straight to retrieval.
+
+    Priority: tools > rewrite > retrieve.
 
     Returns
     -------
     str
-        ``"rewrite_node"`` when the orchestrator flagged the question
-        for rewriting, ``"retrieve_node"`` otherwise.
+        ``"tool_node"`` when the execution plan lists expected tools,
+        ``"rewrite_node"`` when rewriting is flagged,
+        ``"retrieve_node"`` otherwise.
     """
+    plan = state.get("execution_plan", {})
+    raw_tools = plan.get("expected_tools", [])
+    expected_tools: list[str] = (
+        [str(t) for t in raw_tools] if isinstance(raw_tools, list) else []
+    )
+
+    if expected_tools:
+        _log_decision(f"planner_node -> tool_node  (tools: {expected_tools})", state)
+        return RouteDecision.TOOL
+
     if state.get("requires_rewrite"):
-        _log_decision("START -> rewrite_node", state)
+        _log_decision("planner_node -> rewrite_node", state)
         return RouteDecision.REWRITE
 
-    _log_decision("START -> retrieve_node  (rewrite skipped)", state)
+    _log_decision("planner_node -> retrieve_node  (rewrite skipped)", state)
+    return RouteDecision.RETRIEVE
+
+
+def route_after_tool(state: AgentState) -> str:
+    """After tool execution, proceed to rewrite or retrieve.
+
+    Tool results are stored in state — the retrieve/generate nodes
+    can consume them later.
+    """
+    if state.get("requires_rewrite"):
+        _log_decision("tool_node -> rewrite_node", state)
+        return RouteDecision.REWRITE
+
+    _log_decision("tool_node -> retrieve_node", state)
     return RouteDecision.RETRIEVE
 
 

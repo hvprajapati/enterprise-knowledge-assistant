@@ -6,30 +6,30 @@ The graph topology::
                       │
                 planner_node          ← analyses question, creates plan
                       │          ┌──────────────────────────┐
-              route_after_start   │                          │
-                 ┌────────┴───────┤  FULL_PIPELINE retry     │
-                 ▼                 │  (back to planner)       │
-          rewrite_node             │                          │
-                 │                 │                          │
-          route_after_rewrite      │                          │
-                 │                 │                          │
-                 └──────┬──────────┤                          │
-                        ▼          │                          │
-                 retrieve_node ◄───┤ RETRIEVE_AGAIN retry     │
-                        │          │                          │
-                route_after_retrieve                          │
-                   ┌────────┴────────┐                        │
-                   ▼                  ▼                        │
-            generate_node ◄──────────┼── GENERATE_AGAIN retry │
-                   │                 │                        │
-                   ▼                 │                        │
-            reflection_node          │                        │
-                   │                 │                        │
-                   ▼                 │                        │
-            validation_node          │                        │
-                   │                 │                        │
-                   ▼                 │                        │
-              retry_node ────────────┴────────────────────────┘
+              route_after_planner    │                          │
+                 ┌──────┴──────┐     │  FULL_PIPELINE retry     │
+                 ▼             ▼     │  (back to planner)       │
+            tool_node    rewrite_node│                          │
+                 │             │     │                          │
+          route_after_tool      │     │                          │
+                 │             │     │                          │
+                 └──────┬──────┘     │                          │
+                        ▼             │                          │
+                 retrieve_node ◄──────┤ RETRIEVE_AGAIN retry     │
+                        │             │                          │
+                route_after_retrieve  │                          │
+                   ┌────────┴────────┐│                          │
+                   ▼                  ▼│                          │
+            generate_node ◄───────────┼┼── GENERATE_AGAIN retry │
+                   │                  ││                         │
+                   ▼                  ││                         │
+            reflection_node           ││                         │
+                   │                  ││                         │
+                   ▼                  ││                         │
+            validation_node           ││                         │
+                   │                  ││                         │
+                   ▼                  ││                         │
+              retry_node ─────────────┴┴─────────────────────────┘
                    │
             route_after_retry
                    │
@@ -52,13 +52,15 @@ from app.agent.nodes import (
     retrieve_node,
     retry_node,
     rewrite_node,
+    tool_node,
     validation_node,
 )
 from app.agent.router import (
+    route_after_planner,
     route_after_retrieve,
     route_after_retry,
     route_after_rewrite,
-    route_after_start,
+    route_after_tool,
 )
 from app.agent.state import AgentState
 
@@ -71,6 +73,7 @@ def build_graph() -> StateGraph:
 
     # -- nodes -----------------------------------------------------------
     graph.add_node("planner_node", planner_node)
+    graph.add_node("tool_node", tool_node)
     graph.add_node("rewrite_node", rewrite_node)
     graph.add_node("retrieve_node", retrieve_node)
     graph.add_node("generate_node", generate_node)
@@ -82,10 +85,21 @@ def build_graph() -> StateGraph:
     # START -> planner_node (always)
     graph.set_entry_point("planner_node")
 
-    # planner_node -> conditional (rewrite or skip to retrieve)
+    # planner_node -> conditional (tool → rewrite → retrieve)
     graph.add_conditional_edges(
         "planner_node",
-        route_after_start,
+        route_after_planner,
+        {
+            "tool_node": "tool_node",
+            "rewrite_node": "rewrite_node",
+            "retrieve_node": "retrieve_node",
+        },
+    )
+
+    # tool_node -> conditional (rewrite or retrieve)
+    graph.add_conditional_edges(
+        "tool_node",
+        route_after_tool,
         {"rewrite_node": "rewrite_node", "retrieve_node": "retrieve_node"},
     )
 

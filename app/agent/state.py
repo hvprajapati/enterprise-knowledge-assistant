@@ -24,6 +24,10 @@ class AgentState(TypedDict, total=False):
     # -- planner output ----------------------------------------------------
     execution_plan: dict[str, object]  # serialised ExecutionPlan
 
+    # -- tool output --------------------------------------------------------
+    tool_decision: dict[str, object]   # serialised ToolDecision
+    tool_result: dict[str, object]     # serialised ToolResult
+
     # -- reflection output --------------------------------------------------
     reflection_result: dict[str, object]  # serialised ReflectionResult
 

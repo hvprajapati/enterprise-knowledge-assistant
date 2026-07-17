@@ -17,6 +17,7 @@ from app.agent.retry.retry_engine import RetryEngine
 from app.agent.state import AgentState
 from app.agent.validation import ValidationResult
 from app.agent.validation.validator import AnswerValidator
+from app.tools import ToolDecision, ToolExecutor, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,91 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         "execution_plan": plan.model_dump(),
         "requires_rewrite": plan.requires_rewrite,
         "executed_nodes": _track(state, "planner"),
+    }
+
+
+def tool_node(state: AgentState) -> dict[str, Any]:
+    """Execute tools identified in the execution plan.
+
+    Reads
+    -----
+    execution_plan, question from state.
+
+    Sets
+    ----
+    tool_decision : dict    (serialised ToolDecision)
+    tool_result   : dict    (serialised ToolResult)
+    executed_nodes : appended ``"tool"``
+
+    When no tools are expected this node is a fast no-op — it stores
+    a ``skip_tools`` decision and returns immediately.
+
+    On tool failure stores the error in ``ToolResult`` but does NOT
+    crash the graph — the RAG pipeline still runs.
+    """
+    _record(state, "tool")
+    plan_dict = state.get("execution_plan", {})
+    question = state["question"]
+
+    raw_tools = plan_dict.get("expected_tools", [])
+    expected_tools: list[str] = (
+        [str(t) for t in raw_tools] if isinstance(raw_tools, list) else []
+    )
+
+    # --- no tools needed ---
+    if not expected_tools:
+        decision = ToolDecision.skip_tools()
+        logger.info("Tool node — no tools expected, skipping.")
+        return {
+            "tool_decision": decision.model_dump(),
+            "tool_result": {},
+            "executed_nodes": _track(state, "tool"),
+        }
+
+    # --- select & execute the first expected tool ---
+    # In the future this will be replaced with an LLM-based selector.
+    executor: ToolExecutor = _get_service("tool_executor")
+    tool_name = expected_tools[0]
+
+    # Build arguments: map the question to the tool's required params
+    arguments = _build_tool_arguments(tool_name, question)
+
+    decision = ToolDecision(
+        use_tool=True,
+        tool_name=tool_name,
+        arguments=arguments,
+        confidence=1.0,
+        reasoning=f"Planner requested tool: {tool_name}",
+    )
+
+    logger.info(
+        "Tool node — invoking tool=%s  args=%s",
+        tool_name,
+        decision.arguments,
+    )
+
+    result: ToolResult = executor.execute(
+        tool_name=tool_name,
+        arguments=decision.arguments,
+    )
+
+    if result.success:
+        logger.info(
+            "Tool node — tool=%s succeeded  latency=%.0fms",
+            tool_name,
+            result.execution_time_ms,
+        )
+    else:
+        logger.warning(
+            "Tool node — tool=%s failed: %s",
+            tool_name,
+            result.error,
+        )
+
+    return {
+        "tool_decision": decision.model_dump(),
+        "tool_result": result.model_dump(),
+        "executed_nodes": _track(state, "tool"),
     }
 
 
@@ -122,7 +208,11 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     reranked = reranker.rerank(question, candidates, top_k=5)
 
     # Build prompt (so we have context ready for generate_node)
-    prompt = prompt_builder.build_prompt(question, reranked)
+    # Include tool results if available
+    tool_result: dict[str, object] = state.get("tool_result", {})
+    prompt = prompt_builder.build_prompt(
+        question, reranked, tool_result=tool_result if tool_result else None
+    )
 
     # Serialise for state
     serialised = [
@@ -302,6 +392,21 @@ def retry_node(state: AgentState) -> dict[str, Any]:
         "retry_count": new_retry_count,
         "executed_nodes": _track(state, "retry"),
     }
+
+
+def _build_tool_arguments(tool_name: str, question: str) -> dict[str, Any]:
+    """Map a question to the expected arguments for *tool_name*.
+
+    This is a simple deterministic mapping.  When an LLM-based tool
+    selector is added, it will replace this function with a prompt
+    that extracts arguments from the user's question.
+    """
+    mapping: dict[str, dict[str, Any]] = {
+        "calculator": {"expression": question},
+        "document-search": {"query": question, "top_k": 5},
+        "current-time": {},
+    }
+    return mapping.get(tool_name, {"question": question})
 
 
 # ---------------------------------------------------------------------------

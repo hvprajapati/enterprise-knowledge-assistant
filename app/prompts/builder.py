@@ -58,6 +58,8 @@ class PromptBuilder:
         self,
         question: str,
         context: list[SearchResult],
+        *,
+        tool_result: dict[str, object] | None = None,
     ) -> str:
         """Assemble the full RAG prompt.
 
@@ -68,6 +70,10 @@ class PromptBuilder:
         context:
             Ranked retrieval results (may be empty).  Only the first
             ``max_context_chunks`` are used.
+        tool_result:
+            Optional serialised ``ToolResult`` from the tool_node.
+            When provided and ``success=True``, tool output is included
+            in a separate section before the retrieved context.
 
         Returns
         -------
@@ -75,26 +81,48 @@ class PromptBuilder:
             A complete prompt string ready for an LLM.
         """
         logger.info(
-            "Building prompt — question=%d chars, context chunks=%d",
+            "Building prompt — question=%d chars, context chunks=%d, has_tool=%s",
             len(question),
             len(context),
+            tool_result is not None and bool(tool_result),
         )
 
-        if not context:
+        has_context = bool(context)
+        has_tool = (
+            tool_result is not None
+            and bool(tool_result)
+            and bool(tool_result.get("success"))
+        )
+
+        if not has_context and not has_tool:
             return self._build_no_context_prompt(question)
 
         # Safety cap
         passages = context[: self._max_chunks]
 
-        # -- format each retrieved passage ------------------------------
-        formatted = self._format_passages(passages)
+        # -- format each section ---------------------------------------
+        sections: list[str] = []
+
+        # Tool results section (before context — tools are authoritative)
+        if has_tool:
+            assert tool_result is not None  # guaranteed by has_tool check above
+            tool_block = self._format_tool_result(tool_result)
+            sections.append(tool_block)
+
+        # Retrieved context section
+        if passages:
+            context_block = self._format_passages(passages)
+            sections.append(context_block)
+
+        combined = "\n\n".join(sections)
 
         # -- assemble final prompt -------------------------------------
-        prompt = self._assemble(question, formatted)
+        prompt = self._assemble(question, combined)
 
         logger.info(
-            "Prompt built — %d passages, %d chars total",
+            "Prompt built — %d passages, tool=%s, %d chars total",
             len(passages),
+            has_tool,
             len(prompt),
         )
 
@@ -125,14 +153,14 @@ class PromptBuilder:
 
         return _PASSAGE_SEPARATOR.join(blocks)
 
-    def _assemble(self, question: str, context_block: str) -> str:
-        """Combine system prompt, context, question, and answer preamble."""
+    def _assemble(self, question: str, content_block: str) -> str:
+        """Combine system prompt, content, question, and answer preamble."""
         return (
             f"{self._system}\n"
             f"\n"
             f"{'=' * 60}\n"
             f"\n"
-            f"{context_block}\n"
+            f"{content_block}\n"
             f"\n"
             f"{'=' * 60}\n"
             f"Question:\n"
@@ -141,6 +169,43 @@ class PromptBuilder:
             f"{'=' * 60}\n"
             f"Answer:\n"
         )
+
+    def _format_tool_result(
+        self,
+        tool_result: dict[str, object],
+    ) -> str:
+        """Render a tool result as a clearly labelled text block.
+
+        Distinguished from retrieved context so the LLM knows this
+        information came from an external tool invocation, not from
+        document retrieval.
+        """
+        tool_name = str(tool_result.get("tool_name", "unknown"))
+        output = tool_result.get("output", {})
+        success = bool(tool_result.get("success", False))
+
+        lines = [
+            "=" * 60,
+            "TOOL RESULT",
+            "=" * 60,
+            f"Tool: {tool_name}",
+            f"Status: {'SUCCESS' if success else 'FAILED'}",
+            "",
+        ]
+
+        if success and isinstance(output, dict):
+            for key, value in output.items():
+                lines.append(f"  {key}: {value}")
+        elif not success:
+            error = str(tool_result.get("error", "Unknown error"))
+            lines.append(f"  Error: {error}")
+
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("RETRIEVED CONTEXT")
+        lines.append("=" * 60)
+
+        return "\n".join(lines)
 
     def _build_no_context_prompt(self, question: str) -> str:
         """Return a prompt that tells the LLM to report no results."""
