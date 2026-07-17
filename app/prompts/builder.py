@@ -59,7 +59,7 @@ class PromptBuilder:
         question: str,
         context: list[SearchResult],
         *,
-        tool_result: dict[str, object] | None = None,
+        tool_results: list[dict[str, object]] | None = None,
     ) -> str:
         """Assemble the full RAG prompt.
 
@@ -70,31 +70,30 @@ class PromptBuilder:
         context:
             Ranked retrieval results (may be empty).  Only the first
             ``max_context_chunks`` are used.
-        tool_result:
-            Optional serialised ``ToolResult`` from the tool_node.
-            When provided and ``success=True``, tool output is included
-            in a separate section before the retrieved context.
+        tool_results:
+            Optional list of serialised ``ToolResult`` from the tool
+            executor node.  Successful results are rendered in a
+            separate "TOOL RESULTS" section before retrieved context.
 
         Returns
         -------
         str
             A complete prompt string ready for an LLM.
         """
+        results_list = tool_results or []
+        successful = [r for r in results_list if r.get("success")]
+
         logger.info(
-            "Building prompt — question=%d chars, context chunks=%d, has_tool=%s",
+            "Building prompt — question=%d chars, context chunks=%d, tool_results=%d",
             len(question),
             len(context),
-            tool_result is not None and bool(tool_result),
+            len(successful),
         )
 
         has_context = bool(context)
-        has_tool = (
-            tool_result is not None
-            and bool(tool_result)
-            and bool(tool_result.get("success"))
-        )
+        has_tools = len(successful) > 0
 
-        if not has_context and not has_tool:
+        if not has_context and not has_tools:
             return self._build_no_context_prompt(question)
 
         # Safety cap
@@ -104,9 +103,8 @@ class PromptBuilder:
         sections: list[str] = []
 
         # Tool results section (before context — tools are authoritative)
-        if has_tool:
-            assert tool_result is not None  # guaranteed by has_tool check above
-            tool_block = self._format_tool_result(tool_result)
+        if has_tools:
+            tool_block = self._format_tool_results(successful)
             sections.append(tool_block)
 
         # Retrieved context section
@@ -120,9 +118,9 @@ class PromptBuilder:
         prompt = self._assemble(question, combined)
 
         logger.info(
-            "Prompt built — %d passages, tool=%s, %d chars total",
+            "Prompt built — %d passages, %d tool results, %d chars total",
             len(passages),
-            has_tool,
+            len(successful),
             len(prompt),
         )
 
@@ -170,37 +168,34 @@ class PromptBuilder:
             f"Answer:\n"
         )
 
-    def _format_tool_result(
+    def _format_tool_results(
         self,
-        tool_result: dict[str, object],
+        tool_results: list[dict[str, object]],
     ) -> str:
-        """Render a tool result as a clearly labelled text block.
+        """Render multiple tool results as a clearly labelled text block.
 
+        Each tool gets its own sub-section with name, status, and output.
         Distinguished from retrieved context so the LLM knows this
-        information came from an external tool invocation, not from
-        document retrieval.
+        information came from external tool invocations.
         """
-        tool_name = str(tool_result.get("tool_name", "unknown"))
-        output = tool_result.get("output", {})
-        success = bool(tool_result.get("success", False))
-
         lines = [
             "=" * 60,
-            "TOOL RESULT",
+            "TOOL RESULTS",
             "=" * 60,
-            f"Tool: {tool_name}",
-            f"Status: {'SUCCESS' if success else 'FAILED'}",
+            f"Executed {len(tool_results)} tool(s) successfully.",
             "",
         ]
 
-        if success and isinstance(output, dict):
-            for key, value in output.items():
-                lines.append(f"  {key}: {value}")
-        elif not success:
-            error = str(tool_result.get("error", "Unknown error"))
-            lines.append(f"  Error: {error}")
+        for i, tr in enumerate(tool_results, start=1):
+            tool_name = str(tr.get("tool_name", "unknown"))
+            output = tr.get("output", {})
 
-        lines.append("")
+            lines.append(f"[Tool {i}] {tool_name}")
+            if isinstance(output, dict):
+                for key, value in output.items():
+                    lines.append(f"  {key}: {value}")
+            lines.append("")
+
         lines.append("=" * 60)
         lines.append("RETRIEVED CONTEXT")
         lines.append("=" * 60)

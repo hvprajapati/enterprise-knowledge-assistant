@@ -38,6 +38,7 @@ from app.tools import ToolExecutor, ToolRegistry
 from app.tools.calculator import CalculatorTool
 from app.tools.current_time import CurrentTimeTool
 from app.tools.document_search import DocumentSearchTool
+from app.tools.planner import MultiToolPlanner, SequentialToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,14 @@ class EnterpriseKnowledgeAgent:
         _services["tool_registry"] = tool_registry
         _services["tool_executor"] = ToolExecutor(registry=tool_registry)
 
+        # -- multi-tool planning -----------------------------------------
+        _services["tool_planner"] = MultiToolPlanner(
+            available_tools=tool_registry.list_tools(),
+        )
+        _services["tool_sequential_executor"] = SequentialToolExecutor(
+            tool_executor=_services["tool_executor"],
+        )
+
         self._graph = build_graph().compile()
 
     # ------------------------------------------------------------------
@@ -121,8 +130,8 @@ class EnterpriseKnowledgeAgent:
             "executed_nodes": [],
             "requires_rewrite": False,  # will be set by planner_node
             "execution_plan": {},  # will be set by planner_node
-            "tool_decision": {},  # will be set by tool_node
-            "tool_result": {},  # will be set by tool_node
+            "tool_execution_plan": {},  # will be set by tool_planner_node
+            "tool_results": [],  # will be set by tool_executor_node
             "reflection_result": {},  # will be set by reflection_node
             "validation_result": {},  # will be set by validation_node
             "retry_decision": {},  # will be set by retry_node

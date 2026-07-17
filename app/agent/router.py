@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class RouteDecision(StrEnum):
     """Valid next-step destinations recognised by LangGraph."""
 
-    TOOL = "tool_node"
+    TOOL_PLANNER = "tool_planner_node"
     REWRITE = "rewrite_node"
     RETRIEVE = "retrieve_node"
     GENERATE = "generate_node"
@@ -38,16 +38,12 @@ class RouteDecision(StrEnum):
 
 
 def route_after_planner(state: AgentState) -> str:
-    """Decide whether to execute tools, rewrite, or go straight to retrieval.
+    """Decide whether to plan tools, rewrite, or go straight to retrieval.
 
-    Priority: tools > rewrite > retrieve.
+    Priority: tool_planner > rewrite > retrieve.
 
-    Returns
-    -------
-    str
-        ``"tool_node"`` when the execution plan lists expected tools,
-        ``"rewrite_node"`` when rewriting is flagged,
-        ``"retrieve_node"`` otherwise.
+    The tool_planner always runs — it will produce an empty plan if
+    no tools are needed, and the executor will skip quickly.
     """
     plan = state.get("execution_plan", {})
     raw_tools = plan.get("expected_tools", [])
@@ -56,8 +52,11 @@ def route_after_planner(state: AgentState) -> str:
     )
 
     if expected_tools:
-        _log_decision(f"planner_node -> tool_node  (tools: {expected_tools})", state)
-        return RouteDecision.TOOL
+        _log_decision(
+            f"planner_node -> tool_planner_node  (tools: {expected_tools})",
+            state,
+        )
+        return RouteDecision.TOOL_PLANNER
 
     if state.get("requires_rewrite"):
         _log_decision("planner_node -> rewrite_node", state)
@@ -67,17 +66,17 @@ def route_after_planner(state: AgentState) -> str:
     return RouteDecision.RETRIEVE
 
 
-def route_after_tool(state: AgentState) -> str:
+def route_after_tool_executor(state: AgentState) -> str:
     """After tool execution, proceed to rewrite or retrieve.
 
     Tool results are stored in state — the retrieve/generate nodes
-    can consume them later.
+    consume them later.
     """
     if state.get("requires_rewrite"):
-        _log_decision("tool_node -> rewrite_node", state)
+        _log_decision("tool_executor_node -> rewrite_node", state)
         return RouteDecision.REWRITE
 
-    _log_decision("tool_node -> retrieve_node", state)
+    _log_decision("tool_executor_node -> retrieve_node", state)
     return RouteDecision.RETRIEVE
 
 

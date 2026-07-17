@@ -419,75 +419,54 @@ class TestToolDecision:
 
 
 class TestToolNodeIntegration:
-    """Lightweight tests that exercise the tool_node function directly."""
+    """Lightweight tests that exercise tool_planner_node and tool_executor_node."""
 
-    def test_tool_node_skip_when_no_tools_expected(self) -> None:
-        from app.agent.nodes import tool_node
+    def test_tool_planner_produces_empty_plan(self) -> None:
+        """A non-tool question should produce an empty plan."""
+        from app.agent.nodes import _services, tool_planner_node
+        from app.tools.planner import MultiToolPlanner
+
+        _services["tool_planner"] = MultiToolPlanner(
+            available_tools=[
+                {"name": "calculator", "description": "...", "schema": {}},
+            ]
+        )
 
         state: dict = {
-            "question": "What is FAISS?",
+            "question": "What is the meaning of life?",
             "execution_plan": {"expected_tools": []},
             "executed_nodes": ["planner"],
         }
 
-        result = tool_node(state)  # type: ignore[arg-type]
+        result = tool_planner_node(state)  # type: ignore[arg-type]
 
-        assert "tool_decision" in result
-        assert result["tool_decision"]["use_tool"] is False
-        assert result["tool_result"] == {}
-        assert "tool" in result["executed_nodes"]
+        plan = result["tool_execution_plan"]
+        assert plan["tools"] == []
+        assert "tool_planner" in result["executed_nodes"]
 
-    def test_tool_node_executes_calculator(self) -> None:
-        from app.agent.nodes import _services, tool_node
-
-        registry = ToolRegistry()
-        registry.register(CalculatorTool())
-        _services["tool_executor"] = ToolExecutor(registry=registry)
+    def test_tool_executor_empty_plan_skips(self) -> None:
+        from app.agent.nodes import tool_executor_node
 
         state: dict = {
-            "question": "10 + 5",
-            "execution_plan": {"expected_tools": ["calculator"]},
-            "executed_nodes": ["planner"],
+            "question": "Hello",
+            "tool_execution_plan": {"tools": [], "reasoning": "", "expected_outputs": []},
+            "executed_nodes": ["planner", "tool_planner"],
         }
 
-        result = tool_node(state)  # type: ignore[arg-type]
+        result = tool_executor_node(state)  # type: ignore[arg-type]
 
-        assert result["tool_decision"]["use_tool"] is True
-        assert result["tool_decision"]["tool_name"] == "calculator"
-        tool_result = result["tool_result"]
-        assert tool_result["success"] is True
-        assert tool_result["tool_name"] == "calculator"
+        assert result["tool_results"] == []
+        assert "tool_executor" in result["executed_nodes"]
 
-    def test_tool_node_handles_missing_tool_gracefully(self) -> None:
-        from app.agent.nodes import _services, tool_node
+    def test_tool_planner_engine_not_configured(self) -> None:
+        from app.agent.nodes import _services, tool_planner_node
 
-        _services["tool_executor"] = ToolExecutor(registry=ToolRegistry())
-
-        state: dict = {
-            "question": "Use a missing tool.",
-            "execution_plan": {"expected_tools": ["nonexistent-tool"]},
-            "executed_nodes": ["planner"],
-        }
-
-        result = tool_node(state)  # type: ignore[arg-type]
-
-        assert result["tool_decision"]["use_tool"] is True
-        tool_result = result["tool_result"]
-        assert tool_result["success"] is False
-        assert "not registered" in tool_result["error"]
-        # Graph does NOT crash
-        assert "tool" in result["executed_nodes"]
-
-    def test_tool_node_engine_not_configured(self) -> None:
-        from app.agent.nodes import _services, tool_node
-
-        _services.pop("tool_executor", None)
+        _services.pop("tool_planner", None)
 
         state: dict = {
             "question": "Q",
-            "execution_plan": {"expected_tools": ["calculator"]},
             "executed_nodes": ["planner"],
         }
 
-        with pytest.raises(RuntimeError, match="tool_executor"):
-            tool_node(state)  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError, match="tool_planner"):
+            tool_planner_node(state)  # type: ignore[arg-type]

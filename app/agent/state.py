@@ -25,8 +25,8 @@ class AgentState(TypedDict, total=False):
     execution_plan: dict[str, object]  # serialised ExecutionPlan
 
     # -- tool output --------------------------------------------------------
-    tool_decision: dict[str, object]   # serialised ToolDecision
-    tool_result: dict[str, object]     # serialised ToolResult
+    tool_execution_plan: dict[str, object]  # serialised ToolExecutionPlan
+    tool_results: list[dict[str, object]]   # serialised list[ToolResult]
 
     # -- reflection output --------------------------------------------------
     reflection_result: dict[str, object]  # serialised ReflectionResult
