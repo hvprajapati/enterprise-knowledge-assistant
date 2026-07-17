@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.agent.reflection import ReflectionResult
+from app.agent.reflection.reflection import ReflectionEngine
 from app.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -164,6 +166,47 @@ def generate_node(state: AgentState) -> dict[str, Any]:
     return {
         "answer": answer,
         "executed_nodes": _track(state, "generate"),
+    }
+
+
+def reflection_node(state: AgentState) -> dict[str, Any]:
+    """Evaluate the generated answer for quality and groundedness.
+
+    Reads
+    -----
+    question, answer, search_results from state.
+
+    Sets
+    ----
+    reflection_result : dict  (serialised ReflectionResult)
+    executed_nodes     : appended ``"reflection"``
+
+    On failure stores a neutral ``ReflectionResult`` so the graph
+    never halts because of a broken evaluator.
+    """
+    _record(state, "reflection")
+    question = state.get("rewritten_question") or state["question"]
+    answer = state.get("answer") or ""
+    search_results = state.get("search_results", [])
+
+    engine: ReflectionEngine = _get_service("reflection_engine")
+
+    result: ReflectionResult = engine.reflect(
+        question=question,
+        answer=answer,
+        retrieved_chunks=search_results,
+    )
+
+    logger.info(
+        "Reflection node — quality=%s  grounded=%s  confidence=%.2f",
+        result.answer_quality.value,
+        result.grounded.value,
+        result.confidence_score,
+    )
+
+    return {
+        "reflection_result": result.model_dump(),
+        "executed_nodes": _track(state, "reflection"),
     }
 
 

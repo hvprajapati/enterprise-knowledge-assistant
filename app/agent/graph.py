@@ -4,7 +4,7 @@ The graph topology::
 
                     START
                       │
-                planner_node          ← NEW: analyses question, creates plan
+                planner_node          ← analyses question, creates plan
                       │
               route_after_start
                  ┌────────┴────────┐
@@ -23,6 +23,9 @@ The graph topology::
             generate_node           END
                    │
                    ▼
+            reflection_node          ← NEW: evaluates answer quality
+                   │
+                   ▼
                   END
 """
 
@@ -35,6 +38,7 @@ from langgraph.graph import END, StateGraph
 from app.agent.nodes import (
     generate_node,
     planner_node,
+    reflection_node,
     retrieve_node,
     rewrite_node,
 )
@@ -57,6 +61,7 @@ def build_graph() -> StateGraph:
     graph.add_node("rewrite_node", rewrite_node)
     graph.add_node("retrieve_node", retrieve_node)
     graph.add_node("generate_node", generate_node)
+    graph.add_node("reflection_node", reflection_node)
 
     # -- edges -----------------------------------------------------------
     # START -> planner_node (always)
@@ -83,7 +88,10 @@ def build_graph() -> StateGraph:
         {"generate_node": "generate_node", END: END},
     )
 
-    # generate_node -> END
-    graph.add_edge("generate_node", END)
+    # generate_node -> reflection_node
+    graph.add_edge("generate_node", "reflection_node")
+
+    # reflection_node -> END
+    graph.add_edge("reflection_node", END)
 
     return graph

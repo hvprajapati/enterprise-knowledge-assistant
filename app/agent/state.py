@@ -24,6 +24,9 @@ class AgentState(TypedDict, total=False):
     # -- planner output ----------------------------------------------------
     execution_plan: dict[str, object]  # serialised ExecutionPlan
 
+    # -- reflection output --------------------------------------------------
+    reflection_result: dict[str, object]  # serialised ReflectionResult
+
     # -- metadata ----------------------------------------------------------
     error: str | None
     executed_nodes: list[str]

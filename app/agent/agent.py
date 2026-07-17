@@ -24,6 +24,7 @@ from typing import Any
 from app.agent.graph import build_graph
 from app.agent.nodes import _services
 from app.agent.planner.planner import Planner
+from app.agent.reflection.reflection import ReflectionEngine
 from app.agent.state import (
     AgentState as _AgentState,  # noqa: F401 — used in initial state construction
 )
@@ -59,6 +60,7 @@ class EnterpriseKnowledgeAgent:
         _services["embedding_service"] = query_service._embed
         _services["prompt_builder"] = query_service._prompt_builder
         _services["orchestrator"] = query_service._orchestrator
+        _services["reflection_engine"] = ReflectionEngine(llm=llm)
 
         self._graph = build_graph().compile()
 
@@ -89,6 +91,7 @@ class EnterpriseKnowledgeAgent:
             "executed_nodes": [],
             "requires_rewrite": False,     # will be set by planner_node
             "execution_plan": {},          # will be set by planner_node
+            "reflection_result": {},       # will be set by reflection_node
         }
 
         logger.info(
