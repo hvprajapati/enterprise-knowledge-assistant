@@ -1,26 +1,8 @@
 """Query orchestration layer.
 
-Coordinates the full RAG pipeline::
-
-    User Question
-        |
-    QueryRewriter         (expand / clarify — optional)
-        |
-    MultiQueryGenerator   (generate N diverse queries — optional)
-        |
-    EmbeddingService      (batch-encode all queries)
-        |
-    Retriever             (retrieve per query)
-        |
-    Merge + Deduplicate   (keep best score per chunk_id)
-        |
-    CrossEncoderReranker  (re-score merged passages)
-        |
-    PromptBuilder         (assemble RAG prompt)
-        |
-    BaseLLM               (generate answer)
-        |
-    QueryResponse         (structured result)
+Uses a ``RetrievalOrchestrator`` to build a ``RetrievalPlan``
+tailored to the user's question.  Only the stages enabled in the
+plan are executed — minimising latency and LLM cost.
 """
 
 from __future__ import annotations
@@ -41,6 +23,7 @@ from app.retrieval.bm25 import BM25Retriever
 from app.retrieval.context_compressor import BaseContextCompressor, SimilarityContextCompressor
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.multi_query import MultiQueryGenerator
+from app.retrieval.orchestrator.orchestrator import RetrievalOrchestrator
 from app.retrieval.parent_document import ParentDocumentRetriever
 from app.retrieval.query_rewriter import QueryRewriter
 from app.retrieval.reranker import CrossEncoderReranker
@@ -94,6 +77,7 @@ class QueryService:
         compressor: BaseContextCompressor | None = None,
         parent_retriever: ParentDocumentRetriever | None = None,
         self_query: SelfQueryParser | None = None,
+        orchestrator: RetrievalOrchestrator | None = None,
     ) -> None:
         self._embed = embedding_service
         self._retriever = retriever
@@ -106,6 +90,7 @@ class QueryService:
         self._compressor = compressor
         self._parent = parent_retriever
         self._self_query = self_query
+        self._orchestrator = orchestrator or RetrievalOrchestrator()
 
     # ------------------------------------------------------------------
     # factory
@@ -248,85 +233,114 @@ class QueryService:
             raise QueryError("question must be a non-empty string")
 
         logger.info("Query request started — question=%d chars", len(question))
+
+        # -- 1. plan -----------------------------------------------------
+        plan = self._orchestrator.plan(question)
+        logger.info(
+            "Plan: type=%s  stages=%s  vector_k=%d  bm25_k=%d",
+            plan.question_type.value,
+            plan.stages_enabled,
+            plan.vector_top_k,
+            plan.bm25_top_k,
+        )
+
         retrieved_count = 0
         reranked_count = 0
 
         try:
-            # -- 0. rewrite ------------------------------------------------
-            if self._rewriter is not None:
+            # -- 2. rewrite (plan-controlled) ----------------------------
+            if plan.rewrite_query and self._rewriter is not None:
                 question = self._rewriter.rewrite(question)
 
-            # -- 0b. self-query parsing -----------------------------------
+            # -- 3. self-query (plan-controlled) -------------------------
             metadata_filters: dict[str, str | None] | None = None
-            if self._self_query is not None:
+            if plan.use_self_query and self._self_query is not None:
                 parsed = self._self_query.parse(question)
                 if parsed.metadata_filters:
                     metadata_filters = parsed.metadata_filters
                 question = parsed.rewritten_query or question
 
-            # -- 1. multi-query generation + embed + retrieve + merge -----
-            candidates, retrieved_count = self._retrieve_multi(
-                question, top_k=top_k, metadata_filters=metadata_filters,
-            )
+            # -- 4. retrieve (plan-controlled multi-query + hybrid) ------
+            use_hybrid = plan.use_hybrid_search and self._hybrid is not None
+            use_multi = plan.use_multi_query and self._multi_query is not None
 
-            # -- 2. rerank ------------------------------------------------
-            t_rerank = time.monotonic()
-            reranked: list[SearchResult] = self._reranker.rerank(
-                question, candidates, top_k=rerank_top_k
-            )
-            reranked_count = len(reranked)
+            if use_multi:
+                queries = self._multi_query.generate(question)  # type: ignore[union-attr]
+            else:
+                queries = [question]
+
             logger.info(
-                "Reranking completed — %d passages (rerank_top_k=%d  latency=%.0fms)",
-                reranked_count,
-                rerank_top_k,
-                (time.monotonic() - t_rerank) * 1000,
+                "Retrieval: %d queries  hybrid=%s  filters=%s",
+                len(queries), use_hybrid, bool(metadata_filters),
             )
 
-            # -- 3. parent document expansion --------------------------------
-            if self._parent is not None:
-                t_parent = time.monotonic()
+            embeddings = self._embed.embed_queries(queries)
+            results_per_query: list[list[SearchResult]] = []
+            total_before_merge = 0
+
+            for emb, qtext in zip(embeddings, queries, strict=True):
+                if use_hybrid:
+                    batch = self._hybrid.retrieve(  # type: ignore[union-attr]
+                        emb, qtext,
+                        top_k=plan.vector_top_k,
+                        metadata_filters=metadata_filters,
+                    )
+                else:
+                    batch = self._retriever.retrieve(emb, top_k=plan.vector_top_k)
+                results_per_query.append(batch)
+                total_before_merge += len(batch)
+
+            candidates = self._merge_deduplicate(results_per_query)
+            retrieved_count = total_before_merge
+            logger.info(
+                "Retrieval: %d queries -> %d raw -> %d unique",
+                len(queries), total_before_merge, len(candidates),
+            )
+
+            # -- 5. rerank (always on) -----------------------------------
+            if plan.rerank:
+                t_rerank = time.monotonic()
+                reranked = self._reranker.rerank(question, candidates, top_k=rerank_top_k)
+                reranked_count = len(reranked)
+                logger.info(
+                    "Reranked: %d -> %d (%.0fms)",
+                    len(candidates), reranked_count,
+                    (time.monotonic() - t_rerank) * 1000,
+                )
+            else:
+                reranked = candidates[:rerank_top_k]
+                reranked_count = len(reranked)
+
+            # -- 6. parent expansion (plan-controlled) -------------------
+            if plan.use_parent_document and self._parent is not None:
                 try:
                     reranked = self._parent.expand(reranked)
-                    logger.info(
-                        "Parent expansion — %d chunks  latency=%.0fms",
-                        len(reranked),
-                        (time.monotonic() - t_parent) * 1000,
-                    )
+                    logger.info("Parent expansion: %d chunks", len(reranked))
                 except Exception:
                     logger.exception("Parent expansion failed — continuing")
 
-            # -- 4. compress ------------------------------------------------
-            if self._compressor is not None:
-                t_compress = time.monotonic()
+            # -- 7. compress (plan-controlled) ---------------------------
+            if plan.use_context_compression and self._compressor is not None:
                 try:
                     reranked = self._compressor.compress(question, reranked)
-                    logger.info(
-                        "Compression completed — %d chunks  latency=%.0fms",
-                        len(reranked),
-                        (time.monotonic() - t_compress) * 1000,
-                    )
+                    logger.info("Compression: %d chunks", len(reranked))
                 except Exception:
-                    logger.exception(
-                        "Context compression failed — continuing with original results"
-                    )
+                    logger.exception("Compression failed — continuing")
 
-            # -- 5. build prompt ------------------------------------------
+            # -- 8. build prompt -----------------------------------------
             t_prompt = time.monotonic()
             prompt = self._prompt_builder.build_prompt(question, reranked)
             logger.info(
-                "Prompt generated — %d chars  latency=%.0fms",
-                len(prompt),
-                (time.monotonic() - t_prompt) * 1000,
+                "Prompt: %d chars (%.0fms)",
+                len(prompt), (time.monotonic() - t_prompt) * 1000,
             )
 
-            # -- 6. LLM ---------------------------------------------------
+            # -- 9. LLM --------------------------------------------------
             t_llm = time.monotonic()
             answer = self._llm.generate(prompt)
-            llm_latency = (time.monotonic() - t_llm) * 1000
             logger.info(
-                "LLM completed — answer=%d chars  latency=%.0fms",
-                len(answer),
-                llm_latency,
+                "LLM: %d chars (%.0fms)",
+                len(answer), (time.monotonic() - t_llm) * 1000,
             )
 
         except LLMError:
@@ -334,19 +348,14 @@ class QueryService:
         except Exception as exc:
             raise QueryError(f"Query pipeline failed: {exc}") from exc
 
-        # -- 6. assemble response ----------------------------------------
+        # -- 10. assemble response ---------------------------------------
         latency_ms = (time.monotonic() - t_start) * 1000
 
-        sources = list({
-            r.chunk.metadata.filename
-            for r in reranked
-        })
+        sources = list({r.chunk.metadata.filename for r in reranked})
 
         logger.info(
-            "Query request finished — latency=%.0fms  retrieved=%d  reranked=%d",
-            latency_ms,
-            retrieved_count,
-            reranked_count,
+            "Query finished — latency=%.0fms  retrieved=%d  reranked=%d",
+            latency_ms, retrieved_count, reranked_count,
         )
 
         return QueryResponse(
@@ -356,76 +365,6 @@ class QueryService:
             reranked_count=reranked_count,
             latency_ms=latency_ms,
         )
-
-    # ------------------------------------------------------------------
-    # multi-query retrieval helpers
-    # ------------------------------------------------------------------
-
-    def _retrieve_multi(
-        self,
-        question: str,
-        *,
-        top_k: int = 50,
-        metadata_filters: dict[str, str | None] | None = None,
-    ) -> tuple[list[SearchResult], int]:
-        """Run multi-query retrieval and return (merged_results, total_count).
-
-        When *metadata_filters* are provided they are forwarded to the
-        hybrid retriever and applied to both dense and sparse results.
-        """
-        # -- generate queries --------------------------------------------
-        queries: list[str]
-        if self._multi_query is not None:
-            queries = self._multi_query.generate(question)
-        else:
-            queries = [question]
-
-        logger.info(
-            "Multi-query: %d queries generated (enabled=%s  filters=%s)",
-            len(queries),
-            self._multi_query is not None,
-            bool(metadata_filters),
-        )
-
-        # -- batch-embed all queries -------------------------------------
-        t_embed = time.monotonic()
-        embeddings = self._embed.embed_queries(queries)
-        logger.debug(
-            "Batch embedding — %d queries  dim=%d  latency=%.0fms",
-            len(embeddings),
-            len(embeddings[0]) if embeddings else 0,
-            (time.monotonic() - t_embed) * 1000,
-        )
-
-        # -- retrieve per query ------------------------------------------
-        t_retrieve = time.monotonic()
-        results_per_query: list[list[SearchResult]] = []
-        total_before_merge = 0
-        for i, (emb, query_text) in enumerate(zip(embeddings, queries, strict=True)):
-            if self._hybrid is not None:
-                batch = self._hybrid.retrieve(
-                    emb, query_text, top_k=top_k, metadata_filters=metadata_filters,
-                )
-            else:
-                batch = self._retriever.retrieve(emb, top_k=top_k)
-            results_per_query.append(batch)
-            total_before_merge += len(batch)
-            logger.debug("  query[%d] retrieved %d results", i, len(batch))
-
-        # -- merge + deduplicate -----------------------------------------
-        merged = self._merge_deduplicate(results_per_query)
-        duplicates_removed = total_before_merge - len(merged)
-
-        logger.info(
-            "Multi-query retrieval — %d queries  %d raw  %d duplicates  %d merged  latency=%.0fms",
-            len(queries),
-            total_before_merge,
-            duplicates_removed,
-            len(merged),
-            (time.monotonic() - t_retrieve) * 1000,
-        )
-
-        return merged, total_before_merge
 
     @staticmethod
     def _merge_deduplicate(
@@ -490,53 +429,69 @@ class QueryService:
 
         logger.info("Streaming query started — question=%d chars", len(question))
 
+        # -- plan ---------------------------------------------------------
+        plan = self._orchestrator.plan(question)
+
         try:
-            # -- 0. rewrite ------------------------------------------------
-            if self._rewriter is not None:
+            # -- rewrite (plan-controlled) --------------------------------
+            if plan.rewrite_query and self._rewriter is not None:
                 question = self._rewriter.rewrite(question)
 
-            # -- 0b. self-query parsing -----------------------------------
+            # -- self-query (plan-controlled) -----------------------------
             metadata_filters: dict[str, str | None] | None = None
-            if self._self_query is not None:
+            if plan.use_self_query and self._self_query is not None:
                 parsed = self._self_query.parse(question)
                 if parsed.metadata_filters:
                     metadata_filters = parsed.metadata_filters
                 question = parsed.rewritten_query or question
 
-            # -- 1. multi-query generation + embed + retrieve + merge -----
-            candidates, _ = self._retrieve_multi(
-                question, top_k=top_k, metadata_filters=metadata_filters,
-            )
+            # -- retrieve (plan-controlled) -------------------------------
+            use_hybrid = plan.use_hybrid_search and self._hybrid is not None
+            use_multi = plan.use_multi_query and self._multi_query is not None
 
-            # -- 2. rerank ------------------------------------------------
-            reranked: list[SearchResult] = self._reranker.rerank(
-                question, candidates, top_k=rerank_top_k
+            queries = (
+                self._multi_query.generate(question)  # type: ignore[union-attr]
+                if use_multi
+                else [question]
             )
-            logger.info(
-                "Stream reranking — %d passages (rerank_top_k=%d)",
-                len(reranked),
-                rerank_top_k,
-            )
+            embeddings = self._embed.embed_queries(queries)
+            results_per_query: list[list[SearchResult]] = []
 
-            # -- 3. parent document expansion --------------------------------
-            if self._parent is not None:
+            for emb, qtext in zip(embeddings, queries, strict=True):
+                if use_hybrid:
+                    batch = self._hybrid.retrieve(  # type: ignore[union-attr]
+                        emb, qtext, top_k=plan.vector_top_k,
+                        metadata_filters=metadata_filters,
+                    )
+                else:
+                    batch = self._retriever.retrieve(emb, top_k=plan.vector_top_k)
+                results_per_query.append(batch)
+
+            candidates = self._merge_deduplicate(results_per_query)
+
+            # -- rerank ---------------------------------------------------
+            reranked = self._reranker.rerank(question, candidates, top_k=rerank_top_k)
+            logger.info("Stream reranking — %d passages", len(reranked))
+
+            # -- parent expansion (plan-controlled) -----------------------
+            if plan.use_parent_document and self._parent is not None:
                 try:
                     reranked = self._parent.expand(reranked)
                 except Exception:
                     logger.exception("Stream parent expansion failed — continuing")
 
-            # -- 4. compress ------------------------------------------------
-            if self._compressor is not None:
+            # -- compress (plan-controlled) -------------------------------
+            if plan.use_context_compression and self._compressor is not None:
                 try:
                     reranked = self._compressor.compress(question, reranked)
                 except Exception:
                     logger.exception("Stream compression failed — continuing")
 
-            # -- 5. build prompt ------------------------------------------
+            # -- build prompt ---------------------------------------------
             prompt = self._prompt_builder.build_prompt(question, reranked)
             logger.info("Stream prompt — %d chars", len(prompt))
 
-            # -- 6. stream LLM --------------------------------------------
+            # -- stream LLM -----------------------------------------------
             t_llm = time.monotonic()
             token_count = 0
 
@@ -544,11 +499,9 @@ class QueryService:
                 token_count += 1
                 yield token
 
-            llm_latency = (time.monotonic() - t_llm) * 1000
             logger.info(
                 "Stream LLM completed — chunks=%d latency=%.0fms",
-                token_count,
-                llm_latency,
+                token_count, (time.monotonic() - t_llm) * 1000,
             )
 
         except LLMError:
