@@ -4,7 +4,9 @@ The graph topology::
 
                     START
                       │
-                planner_node          ← analyses question, creates plan
+               supervisor_node       ← initialises multi-agent tracking
+                      │
+                planner_node         ← delegate to PlannerAgent
                       │          ┌──────────────────────────┐
               route_after_planner    │                          │
          ┌───────────┼───────────┐   │  FULL_PIPELINE retry     │
@@ -17,18 +19,18 @@ The graph topology::
          │           │            │   │                          │
          └─────┬─────┘            │   │                          │
                ▼                  │   │                          │
-        retrieve_node ◄───────────┘   │                          │
+        retrieve_node ◄───────────┘   │  delegate to RetrievalAgent
                │                  │   │                          │
        route_after_retrieve       │   │                          │
           ┌────────┴────────┐     │   │                          │
           ▼                  ▼     │   │                          │
-   generate_node ◄──────────┼─────┼───┤ GENERATE_AGAIN retry    │
+   generate_node ◄──────────┼─────┼───┤  delegate to GenerationAgent
           │                  │     │   │                          │
           ▼                  │     │   │                          │
-   reflection_node           │     │   │                          │
+   reflection_node           │     │   │  delegate to ReflectionAgent
           │                  │     │   │                          │
           ▼                  │     │   │                          │
-   validation_node           │     │   │                          │
+   validation_node           │     │   │  delegate to ValidationAgent
           │                  │     │   │                          │
           ▼                  │     │   │                          │
      retry_node ─────────────┴─────┴───┘                          │
@@ -54,6 +56,7 @@ from app.agent.nodes import (
     retrieve_node,
     retry_node,
     rewrite_node,
+    supervisor_node,
     tool_executor_node,
     tool_planner_node,
     validation_node,
@@ -75,6 +78,7 @@ def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     # -- nodes -----------------------------------------------------------
+    graph.add_node("supervisor_node", supervisor_node)
     graph.add_node("planner_node", planner_node)
     graph.add_node("tool_planner_node", tool_planner_node)
     graph.add_node("tool_executor_node", tool_executor_node)
@@ -86,8 +90,11 @@ def build_graph() -> StateGraph:
     graph.add_node("retry_node", retry_node)
 
     # -- edges -----------------------------------------------------------
-    # START -> planner_node (always)
-    graph.set_entry_point("planner_node")
+    # START -> supervisor_node (always)
+    graph.set_entry_point("supervisor_node")
+
+    # supervisor_node -> planner_node
+    graph.add_edge("supervisor_node", "planner_node")
 
     # planner_node → conditional (tool_planner → rewrite → retrieve)
     graph.add_conditional_edges(

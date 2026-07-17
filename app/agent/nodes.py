@@ -1,8 +1,11 @@
 """LangGraph node functions.
 
-Each node receives the current ``AgentState`` and returns a partial
-state dictionary to merge.  Nodes access global service singletons
-that are initialised once at module-import time.
+Each node delegates to a specialised agent via ``AgentRegistry``.
+This keeps the graph topology stable while allowing agents to be
+swapped, tested, and monitored independently.
+
+Nodes access global service singletons initialised at module-import
+time by ``EnterpriseKnowledgeAgent.__init__``.
 """
 
 from __future__ import annotations
@@ -48,21 +51,48 @@ def _get_service(name: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def planner_node(state: AgentState) -> dict[str, Any]:
-    """Analyse question and create an ``ExecutionPlan``.
+def supervisor_node(state: AgentState) -> dict[str, Any]:
+    """Initialise multi-agent execution tracking.
 
-    Sets
-    ----
-    execution_plan : dict     (serialised ExecutionPlan)
-    requires_rewrite : bool   (from plan)
-    executed_nodes  : list    (appended ``"planner"``)
+    The supervisor agent coordinates the pipeline.  This node sets up
+    state fields that downstream agent nodes update.
     """
-    _record(state, "planner")
-    question = state["question"]
+    _record(state, "supervisor")
+    return {
+        "completed_agents": [],
+        "execution_history": [],
+        "current_agent": "supervisor",
+        "executed_nodes": _track(state, "supervisor"),
+    }
 
+
+def _delegate(state: AgentState, agent_name: str) -> dict[str, Any] | None:
+    """Try to delegate to an agent; return ``None`` if not available.
+
+    Callers should fall back to their original inline implementation
+    when this returns ``None``.
+    """
+    from app.agents.registry import AgentRegistry
+
+    try:
+        registry: AgentRegistry = _get_service("agent_registry")
+        agent = registry.lookup(agent_name)
+        if agent is not None:
+            return agent.execute_with_logging(state)
+    except RuntimeError:
+        pass
+    return None
+
+
+def planner_node(state: AgentState) -> dict[str, Any]:
+    """Analyse question — delegates to PlannerAgent or runs inline."""
+    _record(state, "planner")
+    delegated = _delegate(state, "planner")
+    if delegated is not None:
+        return delegated
+    question = state["question"]
     planner = _get_service("planner")
     plan = planner.create_plan(question)
-
     return {
         "execution_plan": plan.model_dump(),
         "requires_rewrite": plan.requires_rewrite,
@@ -153,21 +183,12 @@ def tool_executor_node(state: AgentState) -> dict[str, Any]:
 
 
 def rewrite_node(state: AgentState) -> dict[str, Any]:
-    """Expand / clarify the question using ``QueryRewriter``.
-
-    Sets
-    ----
-    rewritten_question : str
-    executed_nodes      : appended ``"rewrite"``
-    """
+    """Rewrite the question (delegates to QueryRewriter directly)."""
     _record(state, "rewrite")
     question = state["question"]
-
     rewriter = _get_service("rewriter")
     rewritten = rewriter.rewrite(question)
-
     logger.info("Rewrite node — %d -> %d chars", len(question), len(rewritten))
-
     return {
         "rewritten_question": rewritten,
         "executed_nodes": _track(state, "rewrite"),
@@ -175,130 +196,63 @@ def rewrite_node(state: AgentState) -> dict[str, Any]:
 
 
 def retrieve_node(state: AgentState) -> dict[str, Any]:
-    """Search FAISS and return ranked results.
-
-    Uses the (possibly rewritten) question and the orchestrator's plan
-    to decide which retrieval stages to execute.
-
-    Sets
-    ----
-    search_results : list[dict]
-    executed_nodes  : appended ``"retrieve"``
-    """
+    """Delegate to ``RetrievalAgent`` or run inline."""
     _record(state, "retrieve")
+    delegated = _delegate(state, "retrieval")
+    if delegated is not None:
+        return delegated
+    # Fallback: inline retrieval
     question = state.get("rewritten_question") or state["question"]
-
     retriever = _get_service("retriever")
     reranker = _get_service("reranker")
     embed = _get_service("embedding_service")
     orchestrator = _get_service("orchestrator")
     prompt_builder = _get_service("prompt_builder")
-
-    # ---- run the plan-driven retrieval pipeline ----
     plan = orchestrator.plan(question)
-    logger.info(
-        "Retrieve node — plan type=%s  stages=%s",
-        plan.question_type.value,
-        plan.stages_enabled,
-    )
-
-    # Embed + retrieve (simplified: single query, respects plan)
     embedding = embed.embed_query(question)
     candidates = retriever.retrieve(embedding, top_k=plan.vector_top_k)
-
-    # Rerank
     reranked = reranker.rerank(question, candidates, top_k=5)
-
-    # Build prompt (so we have context ready for generate_node)
-    # Include tool results if available
     tool_results: list[dict[str, object]] = state.get("tool_results", [])
     prompt = prompt_builder.build_prompt(
         question, reranked, tool_results=tool_results if tool_results else None
     )
-
-    # Serialise for state
     serialised = [
-        {
-            "chunk_id": str(r.chunk.chunk_id),
-            "text": r.chunk.text,
-            "score": r.score,
-            "filename": r.chunk.metadata.filename,
-            "page": r.chunk.page_number,
-        }
+        {"chunk_id": str(r.chunk.chunk_id), "text": r.chunk.text,
+         "score": r.score, "filename": r.chunk.metadata.filename,
+         "page": r.chunk.page_number}
         for r in reranked
     ]
-
-    logger.info(
-        "Retrieve node — %d candidates -> %d reranked",
-        len(candidates),
-        len(reranked),
-    )
-
     return {
-        "search_results": serialised,
-        "_prompt": prompt,  # carry-forward for generate_node
+        "search_results": serialised, "_prompt": prompt,
         "executed_nodes": _track(state, "retrieve"),
     }
 
 
 def generate_node(state: AgentState) -> dict[str, Any]:
-    """Call the LLM with the assembled prompt.
-
-    Expects ``_prompt`` to have been set by ``retrieve_node``.
-
-    Sets
-    ----
-    answer : str
-    executed_nodes : appended ``"generate"``
-    """
+    """Delegate to ``GenerationAgent`` or run inline."""
     _record(state, "generate")
+    delegated = _delegate(state, "generation")
+    if delegated is not None:
+        return delegated
     prompt = state.get("_prompt", "")
     llm = _get_service("llm")
-
-    logger.info("Generate node — prompt=%d chars", len(prompt))
     answer = llm.generate(prompt)
-
-    return {
-        "answer": answer,
-        "executed_nodes": _track(state, "generate"),
-    }
+    return {"answer": answer, "executed_nodes": _track(state, "generate")}
 
 
 def reflection_node(state: AgentState) -> dict[str, Any]:
-    """Evaluate the generated answer for quality and groundedness.
-
-    Reads
-    -----
-    question, answer, search_results from state.
-
-    Sets
-    ----
-    reflection_result : dict  (serialised ReflectionResult)
-    executed_nodes     : appended ``"reflection"``
-
-    On failure stores a neutral ``ReflectionResult`` so the graph
-    never halts because of a broken evaluator.
-    """
+    """Delegate to ``ReflectionAgent`` or run inline."""
     _record(state, "reflection")
+    delegated = _delegate(state, "reflection")
+    if delegated is not None:
+        return delegated
     question = state.get("rewritten_question") or state["question"]
     answer = state.get("answer") or ""
     search_results = state.get("search_results", [])
-
     engine: ReflectionEngine = _get_service("reflection_engine")
-
     result: ReflectionResult = engine.reflect(
-        question=question,
-        answer=answer,
-        retrieved_chunks=search_results,
+        question=question, answer=answer, retrieved_chunks=search_results,
     )
-
-    logger.info(
-        "Reflection node — quality=%s  grounded=%s  confidence=%.2f",
-        result.answer_quality.value,
-        result.grounded.value,
-        result.confidence_score,
-    )
-
     return {
         "reflection_result": result.model_dump(),
         "executed_nodes": _track(state, "reflection"),
@@ -306,38 +260,15 @@ def reflection_node(state: AgentState) -> dict[str, Any]:
 
 
 def validation_node(state: AgentState) -> dict[str, Any]:
-    """Gate the answer using reflection scores and thresholds.
-
-    Reads
-    -----
-    reflection_result from state.
-
-    Sets
-    ----
-    validation_result : dict  (serialised ValidationResult)
-    executed_nodes     : appended ``"validation"``
-
-    On failure stores a pessimistic ``ValidationResult``
-    (passed=False, retry_required=True) so the graph does not
-    deliver a bad answer.
-    """
+    """Delegate to ``ValidationAgent`` or run inline."""
     _record(state, "validation")
+    delegated = _delegate(state, "validation")
+    if delegated is not None:
+        return delegated
     reflection_dict = state.get("reflection_result", {})
-
-    # Reconstruct the ReflectionResult from serialised dict
     reflection = ReflectionResult.model_validate(reflection_dict)
-
     validator: AnswerValidator = _get_service("validator")
-
     result: ValidationResult = validator.validate(reflection)
-
-    logger.info(
-        "Validation node — passed=%s  retry=%s  severity=%s",
-        result.passed,
-        result.retry_required,
-        result.severity.value,
-    )
-
     return {
         "validation_result": result.model_dump(),
         "executed_nodes": _track(state, "validation"),

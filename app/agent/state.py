@@ -38,6 +38,11 @@ class AgentState(TypedDict, total=False):
     retry_decision: dict[str, object]  # serialised RetryDecision
     retry_count: int
 
+    # -- multi-agent tracking ----------------------------------------------
+    completed_agents: list[str]
+    current_agent: str
+    execution_history: list[dict[str, object]]
+
     # -- metadata ----------------------------------------------------------
     error: str | None
     executed_nodes: list[str]

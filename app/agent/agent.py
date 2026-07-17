@@ -101,6 +101,25 @@ class EnterpriseKnowledgeAgent:
             tool_executor=_services["tool_executor"],
         )
 
+        # -- multi-agent framework ---------------------------------------
+        from app.agents import (
+            AgentRegistry,
+            GenerationAgent,
+            PlannerAgent,
+            ReflectionAgent,
+            RetrievalAgent,
+            ValidationAgent,
+        )
+
+        agent_registry = AgentRegistry()
+        agent_registry.register(PlannerAgent(planner=_services["planner"]))
+        agent_registry.register(RetrievalAgent())
+        agent_registry.register(GenerationAgent())
+        agent_registry.register(ReflectionAgent())
+        agent_registry.register(ValidationAgent())
+
+        _services["agent_registry"] = agent_registry
+
         self._graph = build_graph().compile()
 
     # ------------------------------------------------------------------
@@ -136,6 +155,9 @@ class EnterpriseKnowledgeAgent:
             "validation_result": {},  # will be set by validation_node
             "retry_decision": {},  # will be set by retry_node
             "retry_count": 0,  # tracks number of retries
+            "completed_agents": [],  # multi-agent tracking
+            "current_agent": "",  # multi-agent tracking
+            "execution_history": [],  # multi-agent tracking
         }
 
         logger.info(
