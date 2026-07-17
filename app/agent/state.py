@@ -18,7 +18,7 @@ class AgentState(TypedDict, total=False):
     # -- pipeline outputs --------------------------------------------------
     rewritten_question: str | None
     search_results: list[dict[str, object]]  # serialised SearchResult
-    _prompt: str                             # carry-forward for generate_node
+    _prompt: str  # carry-forward for generate_node
     answer: str | None
 
     # -- planner output ----------------------------------------------------
@@ -29,6 +29,10 @@ class AgentState(TypedDict, total=False):
 
     # -- validation output --------------------------------------------------
     validation_result: dict[str, object]  # serialised ValidationResult
+
+    # -- retry output -------------------------------------------------------
+    retry_decision: dict[str, object]  # serialised RetryDecision
+    retry_count: int
 
     # -- metadata ----------------------------------------------------------
     error: str | None

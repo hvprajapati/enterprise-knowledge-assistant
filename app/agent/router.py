@@ -80,6 +80,26 @@ def route_after_retrieve(state: AgentState) -> str:
 # ---------------------------------------------------------------------------
 
 
+def route_after_retry(state: AgentState) -> str:
+    """Read the retry decision and route to the appropriate node.
+
+    Returns
+    -------
+    str
+        One of ``"planner_node"``, ``"retrieve_node"``,
+        ``"generate_node"``, or ``"__end__"``.
+    """
+    decision = state.get("retry_decision", {})
+    next_node = str(decision.get("next_node", "__end__"))
+
+    if next_node == "__end__":
+        _log_decision("retry_node -> END  (no retry or limit reached)", state)
+    else:
+        _log_decision(f"retry_node -> {next_node}  (retry loop)", state)
+
+    return next_node
+
+
 def _log_decision(label: str, state: AgentState) -> None:
     executed = state.get("executed_nodes", [])
     logger.info("Routing: %s  (executed: %s)", label, " -> ".join(executed) if executed else "none")

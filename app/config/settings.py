@@ -45,10 +45,10 @@ class Settings(BaseSettings):
         '  Input:  "How does it work?"\n'
         '  Output: "How does Amazon Bedrock Knowledge Base retrieve and rank documents?"\n\n'
         '  Input:  "Explain RAG"\n'
-        "  Output: \"Explain Retrieval-Augmented Generation (RAG), including its indexing, "
+        '  Output: "Explain Retrieval-Augmented Generation (RAG), including its indexing, '
         'retrieval, reranking, and LLM generation components."\n\n'
         '  Input:  "What are the benefits?"\n'
-        "  Output: \"What are the benefits of using a RAG system "
+        '  Output: "What are the benefits of using a RAG system '
         'for enterprise knowledge management?"'
     )
 
@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     validation_require_grounded: bool = True
     validation_require_completeness: bool = True
     validation_require_relevance: bool = True
+
+    # -- retry -----------------------------------------------------------
+    max_agent_retries: int = 2
 
     multi_query_system_prompt: str = (
         "You are a search query generator for a RAG system. "

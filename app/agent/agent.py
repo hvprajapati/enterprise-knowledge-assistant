@@ -25,6 +25,7 @@ from app.agent.graph import build_graph
 from app.agent.nodes import _services
 from app.agent.planner.planner import Planner
 from app.agent.reflection.reflection import ReflectionEngine
+from app.agent.retry.retry_engine import RetryEngine
 from app.agent.state import (
     AgentState as _AgentState,  # noqa: F401 — used in initial state construction
 )
@@ -71,6 +72,9 @@ class EnterpriseKnowledgeAgent:
                 require_relevance=settings.validation_require_relevance,
             )
         )
+        _services["retry_engine"] = RetryEngine(
+            max_retries=settings.max_agent_retries,
+        )
 
         self._graph = build_graph().compile()
 
@@ -99,10 +103,12 @@ class EnterpriseKnowledgeAgent:
             "answer": None,
             "error": None,
             "executed_nodes": [],
-            "requires_rewrite": False,     # will be set by planner_node
-            "execution_plan": {},          # will be set by planner_node
-            "reflection_result": {},       # will be set by reflection_node
-            "validation_result": {},      # will be set by validation_node
+            "requires_rewrite": False,  # will be set by planner_node
+            "execution_plan": {},  # will be set by planner_node
+            "reflection_result": {},  # will be set by reflection_node
+            "validation_result": {},  # will be set by validation_node
+            "retry_decision": {},  # will be set by retry_node
+            "retry_count": 0,  # tracks number of retries
         }
 
         logger.info(

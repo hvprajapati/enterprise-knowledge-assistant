@@ -12,6 +12,8 @@ from typing import Any
 
 from app.agent.reflection import ReflectionResult
 from app.agent.reflection.reflection import ReflectionEngine
+from app.agent.retry import RetryDecision
+from app.agent.retry.retry_engine import RetryEngine
 from app.agent.state import AgentState
 from app.agent.validation import ValidationResult
 from app.agent.validation.validator import AnswerValidator
@@ -30,8 +32,7 @@ def _get_service(name: str) -> Any:
     svc = _services.get(name)
     if svc is None:
         raise RuntimeError(
-            f"Agent service '{name}' not configured. "
-            f"Did you call EnterpriseKnowledgeAgent(...)?"
+            f"Agent service '{name}' not configured. Did you call EnterpriseKnowledgeAgent(...)?"
         )
     return svc
 
@@ -143,7 +144,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
 
     return {
         "search_results": serialised,
-        "_prompt": prompt,           # carry-forward for generate_node
+        "_prompt": prompt,  # carry-forward for generate_node
         "executed_nodes": _track(state, "retrieve"),
     }
 
@@ -248,6 +249,58 @@ def validation_node(state: AgentState) -> dict[str, Any]:
     return {
         "validation_result": result.model_dump(),
         "executed_nodes": _track(state, "validation"),
+    }
+
+
+def retry_node(state: AgentState) -> dict[str, Any]:
+    """Decide whether to loop back through the pipeline.
+
+    Reads
+    -----
+    validation_result, reflection_result, retry_count from state.
+
+    Sets
+    ----
+    retry_decision : dict    (serialised RetryDecision)
+    retry_count    : int      (incremented if a retry is attempted)
+    executed_nodes : appended ``"retry"``
+
+    On failure stores a ``NO_RETRY`` fallback so the graph delivers
+    the current answer rather than looping infinitely.
+    """
+    _record(state, "retry")
+    validation_dict = state.get("validation_result", {})
+    reflection_dict = state.get("reflection_result", {})
+    current_retry_count: int = state.get("retry_count", 0)
+
+    # Reconstruct Pydantic models from serialised dicts
+    validation = ValidationResult.model_validate(validation_dict)
+    reflection = ReflectionResult.model_validate(reflection_dict)
+
+    engine: RetryEngine = _get_service("retry_engine")
+
+    decision: RetryDecision = engine.decide_retry(
+        validation=validation,
+        reflection=reflection,
+        retry_count=current_retry_count,
+    )
+
+    # Increment retry count if retrying (so the next loop sees it)
+    new_retry_count = current_retry_count + 1 if decision.should_retry else current_retry_count
+
+    logger.info(
+        "Retry node — should_retry=%s  strategy=%s  next=%s  count=%d→%d",
+        decision.should_retry,
+        decision.strategy.value,
+        decision.next_node,
+        current_retry_count,
+        new_retry_count,
+    )
+
+    return {
+        "retry_decision": decision.model_dump(),
+        "retry_count": new_retry_count,
+        "executed_nodes": _track(state, "retry"),
     }
 
 

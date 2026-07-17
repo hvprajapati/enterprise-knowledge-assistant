@@ -5,31 +5,38 @@ The graph topology::
                     START
                       │
                 planner_node          ← analyses question, creates plan
-                      │
-              route_after_start
-                 ┌────────┴────────┐
-                 ▼                  ▼
-          rewrite_node        retrieve_node
-                 │                  │
-          route_after_rewrite       │
-                 │                  │
-                 └──────┬───────────┘
-                        ▼
-                 retrieve_node
-                        │
-                route_after_retrieve
-                   ┌────────┴────────┐
-                   ▼                  ▼
-            generate_node           END
+                      │          ┌──────────────────────────┐
+              route_after_start   │                          │
+                 ┌────────┴───────┤  FULL_PIPELINE retry     │
+                 ▼                 │  (back to planner)       │
+          rewrite_node             │                          │
+                 │                 │                          │
+          route_after_rewrite      │                          │
+                 │                 │                          │
+                 └──────┬──────────┤                          │
+                        ▼          │                          │
+                 retrieve_node ◄───┤ RETRIEVE_AGAIN retry     │
+                        │          │                          │
+                route_after_retrieve                          │
+                   ┌────────┴────────┐                        │
+                   ▼                  ▼                        │
+            generate_node ◄──────────┼── GENERATE_AGAIN retry │
+                   │                 │                        │
+                   ▼                 │                        │
+            reflection_node          │                        │
+                   │                 │                        │
+                   ▼                 │                        │
+            validation_node          │                        │
+                   │                 │                        │
+                   ▼                 │                        │
+              retry_node ────────────┴────────────────────────┘
                    │
-                   ▼
-            reflection_node          ← evaluates answer quality
+            route_after_retry
                    │
-                   ▼
-            validation_node          ← NEW: deterministic quality gate
-                   │
-                   ▼
-                  END
+              ┌────┴────┐
+              ▼         ▼
+        (loop back)    END
+
 """
 
 from __future__ import annotations
@@ -43,11 +50,13 @@ from app.agent.nodes import (
     planner_node,
     reflection_node,
     retrieve_node,
+    retry_node,
     rewrite_node,
     validation_node,
 )
 from app.agent.router import (
     route_after_retrieve,
+    route_after_retry,
     route_after_rewrite,
     route_after_start,
 )
@@ -67,6 +76,7 @@ def build_graph() -> StateGraph:
     graph.add_node("generate_node", generate_node)
     graph.add_node("reflection_node", reflection_node)
     graph.add_node("validation_node", validation_node)
+    graph.add_node("retry_node", retry_node)
 
     # -- edges -----------------------------------------------------------
     # START -> planner_node (always)
@@ -99,7 +109,19 @@ def build_graph() -> StateGraph:
     # reflection_node -> validation_node
     graph.add_edge("reflection_node", "validation_node")
 
-    # validation_node -> END
-    graph.add_edge("validation_node", END)
+    # validation_node -> retry_node
+    graph.add_edge("validation_node", "retry_node")
+
+    # retry_node -> conditional (loop back or END)
+    graph.add_conditional_edges(
+        "retry_node",
+        route_after_retry,
+        {
+            "planner_node": "planner_node",
+            "retrieve_node": "retrieve_node",
+            "generate_node": "generate_node",
+            END: END,
+        },
+    )
 
     return graph
