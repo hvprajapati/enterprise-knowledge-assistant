@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 
 import anthropic
 
@@ -109,3 +110,60 @@ class ClaudeLLM(BaseLLM):
         )
 
         return response.content[0].text  # type: ignore[no-any-return]
+
+    # ------------------------------------------------------------------
+    # streaming
+    # ------------------------------------------------------------------
+
+    def stream_generate(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        started = time.monotonic()
+
+        payload: dict[str, object] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        logger.info(
+            "Claude stream started — model=%s max_tokens=%d", self._model, max_tokens
+        )
+
+        token_count = 0
+        try:
+            with self._client.messages.stream(**payload) as stream:
+                for event in stream:
+                    if event.type == "content_block_delta":
+                        text = event.delta.text
+                        token_count += 1
+                        yield text
+        except anthropic.AuthenticationError as exc:
+            raise LLMAuthenticationError(str(exc)) from exc
+        except anthropic.RateLimitError as exc:
+            raise LLMRateLimitError(str(exc)) from exc
+        except anthropic.APITimeoutError as exc:
+            raise LLMTimeoutError(str(exc)) from exc
+        except anthropic.APIConnectionError as exc:
+            raise LLMNetworkError(str(exc)) from exc
+        except anthropic.APIStatusError as exc:
+            raise LLMProviderError(
+                f"Claude returned HTTP {exc.status_code}: {exc.message}"
+            ) from exc
+        except Exception as exc:
+            raise LLMProviderError(str(exc)) from exc
+
+        elapsed = time.monotonic() - started
+        logger.info(
+            "Claude stream finished — latency=%.2fs output_chunks=%d",
+            elapsed,
+            token_count,
+        )

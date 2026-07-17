@@ -28,6 +28,30 @@ class Settings(BaseSettings):
     )
     prompt_max_context_chunks: int = 20
 
+    # -- query rewriting -------------------------------------------------
+    query_rewriter_enabled: bool = True
+    query_rewriter_system_prompt: str = (
+        "You are a query rewriter for a RAG system. "
+        "Your job is to rewrite the user's question to improve retrieval quality.\n\n"
+        "Rules:\n"
+        "  1. NEVER answer the question. Only rewrite it.\n"
+        "  2. Preserve the original intent exactly.\n"
+        '  3. Expand abbreviations (e.g. "RAG" → "Retrieval-Augmented Generation").\n'
+        "  4. Add missing context if it is obvious from the question itself.\n"
+        '  5. Replace vague references (e.g. "it", "this", "that") with specific nouns.\n'
+        "  6. Keep the rewritten question concise — no more than one sentence.\n"
+        "  7. Output ONLY the rewritten question. No preamble, no explanation, no markdown.\n\n"
+        "Examples:\n"
+        '  Input:  "How does it work?"\n'
+        '  Output: "How does Amazon Bedrock Knowledge Base retrieve and rank documents?"\n\n'
+        '  Input:  "Explain RAG"\n'
+        "  Output: \"Explain Retrieval-Augmented Generation (RAG), including its indexing, "
+        'retrieval, reranking, and LLM generation components."\n\n'
+        '  Input:  "What are the benefits?"\n'
+        "  Output: \"What are the benefits of using a RAG system "
+        'for enterprise knowledge management?"'
+    )
+
     # -- LLM ------------------------------------------------------------
     llm_provider: str = "openai"
     llm_model_name: str = "gpt-4o"
@@ -39,6 +63,15 @@ class Settings(BaseSettings):
     claude_api_key: str = ""
     openai_api_key: str = ""
     gemini_api_key: str = ""
+
+    # -- storage paths --------------------------------------------------
+    index_storage_path: str = "storage/index.faiss"
+    database_storage_path: str = "storage/metadata.db"
+
+    # -- upload ---------------------------------------------------------
+    upload_directory: str = "data/uploads"
+    max_upload_size: int = 52_428_800  # 50 MiB
+    supported_upload_extensions: str = ".pdf,.docx,.txt,.md"
 
     model_config = SettingsConfigDict(
         env_file=".env",

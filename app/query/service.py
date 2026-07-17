@@ -4,6 +4,8 @@ Coordinates the full RAG pipeline::
 
     User Question
         |
+    QueryRewriter      (expand / clarify — optional, configurable)
+        |
     EmbeddingService   (text → vector)
         |
     Retriever          (FAISS search + metadata hydration)
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +33,7 @@ from app.llm.exceptions import LLMError
 from app.llm.factory import LLMFactory
 from app.prompts.builder import PromptBuilder
 from app.query.models import QueryResponse
+from app.retrieval.query_rewriter import QueryRewriter
 from app.retrieval.reranker import CrossEncoderReranker
 from app.retrieval.retriever import Retriever
 
@@ -71,12 +75,15 @@ class QueryService:
         reranker: CrossEncoderReranker,
         prompt_builder: PromptBuilder,
         llm: BaseLLM,
+        *,
+        rewriter: QueryRewriter | None = None,
     ) -> None:
         self._embed = embedding_service
         self._retriever = retriever
         self._reranker = reranker
         self._prompt_builder = prompt_builder
         self._llm = llm
+        self._rewriter = rewriter
 
     # ------------------------------------------------------------------
     # factory
@@ -111,6 +118,7 @@ class QueryService:
         reranker = CrossEncoderReranker()
         prompt_builder = PromptBuilder()
         llm = LLMFactory(settings).create()
+        rewriter = QueryRewriter(llm) if settings.query_rewriter_enabled else None
 
         return cls(
             embedding_service=embedding_service,
@@ -118,6 +126,7 @@ class QueryService:
             reranker=reranker,
             prompt_builder=prompt_builder,
             llm=llm,
+            rewriter=rewriter,
         )
 
     # ------------------------------------------------------------------
@@ -177,6 +186,10 @@ class QueryService:
         reranked_count = 0
 
         try:
+            # -- 0. rewrite ------------------------------------------------
+            if self._rewriter is not None:
+                question = self._rewriter.rewrite(question)
+
             # -- 1. embed -------------------------------------------------
             t_embed = time.monotonic()
             embedding = self._embed.embed_query(question)
@@ -260,3 +273,105 @@ class QueryService:
             reranked_count=reranked_count,
             latency_ms=latency_ms,
         )
+
+    # ------------------------------------------------------------------
+    # streaming
+    # ------------------------------------------------------------------
+
+    def stream_answer(
+        self,
+        question: str,
+        *,
+        top_k: int = 50,
+        rerank_top_k: int = 5,
+        source: str | None = None,
+        document_type: str | None = None,
+        tags: list[str] | None = None,
+    ) -> Iterator[str]:
+        """Run the RAG pipeline and yield LLM tokens as they arrive.
+
+        The pipeline (embed → retrieve → rerank → prompt) is identical
+        to ``answer``.  Only the final LLM call switches from
+        ``generate`` to ``stream_generate``.
+
+        Parameters
+        ----------
+        question:
+            The user's raw question.  Must be non-empty.
+        top_k:
+            Candidate passages to retrieve from FAISS (default 50).
+        rerank_top_k:
+            Passages kept after cross-encoder reranking (default 5).
+        source, document_type, tags:
+            Optional metadata filters.
+
+        Yields
+        ------
+        str
+            Incremental text tokens from the LLM.
+
+        Raises
+        ------
+        QueryError
+            Wraps any failure from the pipeline stages (pre-LLM).
+        LLMError
+            Provider-level errors propagate directly.
+        """
+        # -- 0. validate -------------------------------------------------
+        question = question.strip()
+        if not question:
+            raise QueryError("question must be a non-empty string")
+
+        logger.info("Streaming query started — question=%d chars", len(question))
+
+        try:
+            # -- 0. rewrite ------------------------------------------------
+            if self._rewriter is not None:
+                question = self._rewriter.rewrite(question)
+
+            # -- 1. embed -------------------------------------------------
+            embedding = self._embed.embed_query(question)
+
+            # -- 2. retrieve ----------------------------------------------
+            candidates: list[SearchResult] = self._retriever.retrieve(
+                embedding, top_k=top_k
+            )
+            logger.info(
+                "Stream retrieval — %d candidates (top_k=%d)",
+                len(candidates),
+                top_k,
+            )
+
+            # -- 3. rerank ------------------------------------------------
+            reranked: list[SearchResult] = self._reranker.rerank(
+                question, candidates, top_k=rerank_top_k
+            )
+            logger.info(
+                "Stream reranking — %d passages (rerank_top_k=%d)",
+                len(reranked),
+                rerank_top_k,
+            )
+
+            # -- 4. build prompt ------------------------------------------
+            prompt = self._prompt_builder.build_prompt(question, reranked)
+            logger.info("Stream prompt — %d chars", len(prompt))
+
+            # -- 5. stream LLM --------------------------------------------
+            t_llm = time.monotonic()
+            token_count = 0
+
+            for token in self._llm.stream_generate(prompt):
+                token_count += 1
+                yield token
+
+            llm_latency = (time.monotonic() - t_llm) * 1000
+            logger.info(
+                "Stream LLM completed — chunks=%d latency=%.0fms",
+                token_count,
+                llm_latency,
+            )
+
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise QueryError(f"Query pipeline failed: {exc}") from exc

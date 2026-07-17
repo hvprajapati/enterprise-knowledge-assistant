@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 
 import openai
 from openai import OpenAI
@@ -113,3 +114,62 @@ class OpenAILLM(BaseLLM):
         )
 
         return response.choices[0].message.content or ""
+
+    # ------------------------------------------------------------------
+    # streaming
+    # ------------------------------------------------------------------
+
+    def stream_generate(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        started = time.monotonic()
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        logger.info(
+            "OpenAI stream started — model=%s max_tokens=%d", self._model, max_tokens
+        )
+
+        token_count = 0
+        try:
+            stream = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    token_count += 1
+                    yield delta.content
+        except openai.AuthenticationError as exc:
+            raise LLMAuthenticationError(str(exc)) from exc
+        except openai.RateLimitError as exc:
+            raise LLMRateLimitError(str(exc)) from exc
+        except openai.APITimeoutError as exc:
+            raise LLMTimeoutError(str(exc)) from exc
+        except openai.APIConnectionError as exc:
+            raise LLMNetworkError(str(exc)) from exc
+        except openai.APIStatusError as exc:
+            raise LLMProviderError(
+                f"OpenAI returned HTTP {exc.status_code}: {exc.message}"
+            ) from exc
+        except Exception as exc:
+            raise LLMProviderError(str(exc)) from exc
+
+        elapsed = time.monotonic() - started
+        logger.info(
+            "OpenAI stream finished — latency=%.2fs output_chunks=%d",
+            elapsed,
+            token_count,
+        )

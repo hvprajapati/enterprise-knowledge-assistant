@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 
 import google.generativeai as genai
 
@@ -121,3 +122,67 @@ class GeminiLLM(BaseLLM):
         )
 
         return response.text  # type: ignore[no-any-return]
+
+    # ------------------------------------------------------------------
+    # streaming
+    # ------------------------------------------------------------------
+
+    def stream_generate(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        started = time.monotonic()
+
+        contents: list[str] = []
+        if system_prompt:
+            contents.append(f"System: {system_prompt}\n\nUser: {prompt}")
+        else:
+            contents.append(prompt)
+
+        generation_config = genai.types.GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+
+        logger.info(
+            "Gemini stream started — model=%s max_tokens=%d",
+            self._model_name,
+            max_tokens,
+        )
+
+        token_count = 0
+        try:
+            response = self._model.generate_content(
+                contents,
+                generation_config=generation_config,
+                stream=True,
+                request_options={"timeout": self._timeout},
+            )
+            for chunk in response:
+                if chunk.text:
+                    token_count += 1
+                    yield chunk.text
+        except Exception as exc:
+            if google_exceptions is not None:
+                if isinstance(exc, google_exceptions.Unauthenticated):
+                    raise LLMAuthenticationError(str(exc)) from exc
+                if isinstance(exc, google_exceptions.ResourceExhausted):
+                    raise LLMRateLimitError(str(exc)) from exc
+                if isinstance(exc, google_exceptions.DeadlineExceeded):
+                    raise LLMTimeoutError(str(exc)) from exc
+                if isinstance(exc, google_exceptions.ServiceUnavailable):
+                    raise LLMNetworkError(str(exc)) from exc
+                if isinstance(exc, google_exceptions.GoogleAPIError):
+                    raise LLMProviderError(str(exc)) from exc
+            raise LLMProviderError(str(exc)) from exc
+
+        elapsed = time.monotonic() - started
+        logger.info(
+            "Gemini stream finished — latency=%.2fs output_chunks=%d",
+            elapsed,
+            token_count,
+        )
