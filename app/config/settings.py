@@ -52,6 +52,41 @@ class Settings(BaseSettings):
         'for enterprise knowledge management?"'
     )
 
+    # -- multi-query retrieval ------------------------------------------
+    multi_query_enabled: bool = True
+    multi_query_max_variants: int = 4
+
+    # -- hybrid retrieval ------------------------------------------------
+    enable_hybrid_search: bool = True
+    bm25_top_k: int = 50
+    vector_top_k: int = 50
+    rrf_k: int = 60
+
+    # -- context compression ---------------------------------------------
+    enable_context_compression: bool = True
+    max_context_tokens: int = 4096
+    redundancy_threshold: float = 0.92
+
+    multi_query_system_prompt: str = (
+        "You are a search query generator for a RAG system. "
+        "Given a user question, generate multiple semantically diverse "
+        "search queries that will help retrieve relevant documents.\n\n"
+        "Rules:\n"
+        "  1. Generate exactly one query per line.\n"
+        "  2. Each query must preserve the original user intent.\n"
+        "  3. Use different wording, synonyms, and perspectives.\n"
+        "  4. Include related technical terminology.\n"
+        "  5. Keep each query concise (one sentence).\n"
+        "  6. Output ONLY the queries. No numbering, no markdown, no preamble.\n\n"
+        "Example:\n"
+        '  Input:  "What is RAG?"\n'
+        "  Output:\n"
+        "  Explain Retrieval-Augmented Generation\n"
+        "  How does Retrieval-Augmented Generation work?\n"
+        "  RAG architecture components and pipeline\n"
+        "  Document retrieval and generation in RAG systems"
+    )
+
     # -- LLM ------------------------------------------------------------
     llm_provider: str = "openai"
     llm_model_name: str = "gpt-4o"

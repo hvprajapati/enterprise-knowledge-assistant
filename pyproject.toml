@@ -27,6 +27,7 @@ dependencies = [
     "anthropic>=0.39.0",
     "openai>=1.55.0",
     "google-generativeai>=0.8.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [tool.ruff]
@@ -69,5 +70,6 @@ module = [
     "google",
     "google.generativeai",
     "google.api_core.*",
+    "rank_bm25",
 ]
 ignore_missing_imports = true

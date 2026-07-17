@@ -4,19 +4,23 @@ Coordinates the full RAG pipeline::
 
     User Question
         |
-    QueryRewriter      (expand / clarify — optional, configurable)
+    QueryRewriter         (expand / clarify — optional)
         |
-    EmbeddingService   (text → vector)
+    MultiQueryGenerator   (generate N diverse queries — optional)
         |
-    Retriever          (FAISS search + metadata hydration)
+    EmbeddingService      (batch-encode all queries)
         |
-    CrossEncoderReranker  (re-score passages)
+    Retriever             (retrieve per query)
         |
-    PromptBuilder      (assemble RAG prompt)
+    Merge + Deduplicate   (keep best score per chunk_id)
         |
-    BaseLLM            (generate answer)
+    CrossEncoderReranker  (re-score merged passages)
         |
-    QueryResponse      (structured result)
+    PromptBuilder         (assemble RAG prompt)
+        |
+    BaseLLM               (generate answer)
+        |
+    QueryResponse         (structured result)
 """
 
 from __future__ import annotations
@@ -33,9 +37,15 @@ from app.llm.exceptions import LLMError
 from app.llm.factory import LLMFactory
 from app.prompts.builder import PromptBuilder
 from app.query.models import QueryResponse
+from app.retrieval.bm25 import BM25Retriever
+from app.retrieval.context_compressor import BaseContextCompressor, SimilarityContextCompressor
+from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.multi_query import MultiQueryGenerator
 from app.retrieval.query_rewriter import QueryRewriter
 from app.retrieval.reranker import CrossEncoderReranker
 from app.retrieval.retriever import Retriever
+from app.storage.repository import ChunkRepository
+from app.storage.sqlite import SQLiteConnection
 
 if TYPE_CHECKING:
     from app.config.settings import Settings
@@ -77,13 +87,19 @@ class QueryService:
         llm: BaseLLM,
         *,
         rewriter: QueryRewriter | None = None,
+        multi_query: MultiQueryGenerator | None = None,
+        hybrid_retriever: HybridRetriever | None = None,
+        compressor: BaseContextCompressor | None = None,
     ) -> None:
         self._embed = embedding_service
         self._retriever = retriever
+        self._hybrid = hybrid_retriever
         self._reranker = reranker
         self._prompt_builder = prompt_builder
         self._llm = llm
         self._rewriter = rewriter
+        self._multi_query = multi_query
+        self._compressor = compressor
 
     # ------------------------------------------------------------------
     # factory
@@ -119,6 +135,32 @@ class QueryService:
         prompt_builder = PromptBuilder()
         llm = LLMFactory(settings).create()
         rewriter = QueryRewriter(llm) if settings.query_rewriter_enabled else None
+        multi_query = MultiQueryGenerator(llm) if settings.multi_query_enabled else None
+        compressor = (
+            SimilarityContextCompressor(embedding_service)
+            if settings.enable_context_compression
+            else None
+        )
+
+        # Build hybrid retriever (dense + BM25) when enabled
+        hybrid_retriever: HybridRetriever | None = None
+        if settings.enable_hybrid_search:
+            sqlite = SQLiteConnection(database_path)
+            conn = sqlite.connect()
+            try:
+                repo = ChunkRepository(conn)
+                all_chunks = [chunk for _, chunk in repo.iter_all()]
+                if all_chunks:
+                    bm25 = BM25Retriever(all_chunks)
+                    hybrid_retriever = HybridRetriever(
+                        dense=retriever,
+                        bm25=bm25,
+                    )
+                    logger.info("Hybrid retriever initialised — %d BM25 docs", len(all_chunks))
+                else:
+                    logger.warning("No chunks in database — hybrid search disabled")
+            finally:
+                conn.close()
 
         return cls(
             embedding_service=embedding_service,
@@ -127,6 +169,9 @@ class QueryService:
             prompt_builder=prompt_builder,
             llm=llm,
             rewriter=rewriter,
+            multi_query=multi_query,
+            hybrid_retriever=hybrid_retriever,
+            compressor=compressor,
         )
 
     # ------------------------------------------------------------------
@@ -190,34 +235,15 @@ class QueryService:
             if self._rewriter is not None:
                 question = self._rewriter.rewrite(question)
 
-            # -- 1. embed -------------------------------------------------
-            t_embed = time.monotonic()
-            embedding = self._embed.embed_query(question)
-            logger.debug(
-                "Embedding generated — dim=%d latency=%.0fms",
-                len(embedding),
-                (time.monotonic() - t_embed) * 1000,
+            # -- 1. multi-query generation + embed + retrieve + merge -----
+            candidates, retrieved_count = self._retrieve_multi(
+                question, top_k=top_k
             )
 
-            # -- 2. retrieve ----------------------------------------------
-            t_retrieve = time.monotonic()
-            candidates: list[SearchResult] = self._retriever.retrieve(
-                embedding, top_k=top_k
-            )
-            retrieved_count = len(candidates)
-            logger.info(
-                "Retrieval completed — %d candidates (top_k=%d  latency=%.0fms)",
-                retrieved_count,
-                top_k,
-                (time.monotonic() - t_retrieve) * 1000,
-            )
-
-            # -- 3. rerank ------------------------------------------------
+            # -- 2. rerank ------------------------------------------------
             t_rerank = time.monotonic()
             reranked: list[SearchResult] = self._reranker.rerank(
-                question,
-                candidates,
-                top_k=rerank_top_k,
+                question, candidates, top_k=rerank_top_k
             )
             reranked_count = len(reranked)
             logger.info(
@@ -226,6 +252,21 @@ class QueryService:
                 rerank_top_k,
                 (time.monotonic() - t_rerank) * 1000,
             )
+
+            # -- 3. compress ------------------------------------------------
+            if self._compressor is not None:
+                t_compress = time.monotonic()
+                try:
+                    reranked = self._compressor.compress(question, reranked)
+                    logger.info(
+                        "Compression completed — %d chunks  latency=%.0fms",
+                        len(reranked),
+                        (time.monotonic() - t_compress) * 1000,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Context compression failed — continuing with original results"
+                    )
 
             # -- 4. build prompt ------------------------------------------
             t_prompt = time.monotonic()
@@ -273,6 +314,81 @@ class QueryService:
             reranked_count=reranked_count,
             latency_ms=latency_ms,
         )
+
+    # ------------------------------------------------------------------
+    # multi-query retrieval helpers
+    # ------------------------------------------------------------------
+
+    def _retrieve_multi(
+        self,
+        question: str,
+        *,
+        top_k: int = 50,
+    ) -> tuple[list[SearchResult], int]:
+        """Run multi-query retrieval and return (merged_results, total_count)."""
+        # -- generate queries --------------------------------------------
+        queries: list[str]
+        if self._multi_query is not None:
+            queries = self._multi_query.generate(question)
+        else:
+            queries = [question]
+
+        logger.info(
+            "Multi-query: %d queries generated (enabled=%s)",
+            len(queries),
+            self._multi_query is not None,
+        )
+
+        # -- batch-embed all queries -------------------------------------
+        t_embed = time.monotonic()
+        embeddings = self._embed.embed_queries(queries)
+        logger.debug(
+            "Batch embedding — %d queries  dim=%d  latency=%.0fms",
+            len(embeddings),
+            len(embeddings[0]) if embeddings else 0,
+            (time.monotonic() - t_embed) * 1000,
+        )
+
+        # -- retrieve per query ------------------------------------------
+        t_retrieve = time.monotonic()
+        results_per_query: list[list[SearchResult]] = []
+        total_before_merge = 0
+        for i, (emb, query_text) in enumerate(zip(embeddings, queries, strict=True)):
+            if self._hybrid is not None:
+                batch = self._hybrid.retrieve(emb, query_text, top_k=top_k)
+            else:
+                batch = self._retriever.retrieve(emb, top_k=top_k)
+            results_per_query.append(batch)
+            total_before_merge += len(batch)
+            logger.debug("  query[%d] retrieved %d results", i, len(batch))
+
+        # -- merge + deduplicate -----------------------------------------
+        merged = self._merge_deduplicate(results_per_query)
+        duplicates_removed = total_before_merge - len(merged)
+
+        logger.info(
+            "Multi-query retrieval — %d queries  %d raw  %d duplicates  %d merged  latency=%.0fms",
+            len(queries),
+            total_before_merge,
+            duplicates_removed,
+            len(merged),
+            (time.monotonic() - t_retrieve) * 1000,
+        )
+
+        return merged, total_before_merge
+
+    @staticmethod
+    def _merge_deduplicate(
+        results_per_query: list[list[SearchResult]],
+    ) -> list[SearchResult]:
+        """Merge multiple retrieval batches, keeping the highest score per chunk_id."""
+        best: dict[str, SearchResult] = {}
+        for batch in results_per_query:
+            for result in batch:
+                cid = str(result.chunk.chunk_id)
+                if cid not in best or result.score > best[cid].score:
+                    best[cid] = result
+        return sorted(best.values(), key=lambda r: r.score, reverse=True)
 
     # ------------------------------------------------------------------
     # streaming
@@ -329,20 +445,10 @@ class QueryService:
             if self._rewriter is not None:
                 question = self._rewriter.rewrite(question)
 
-            # -- 1. embed -------------------------------------------------
-            embedding = self._embed.embed_query(question)
+            # -- 1. multi-query generation + embed + retrieve + merge -----
+            candidates, _ = self._retrieve_multi(question, top_k=top_k)
 
-            # -- 2. retrieve ----------------------------------------------
-            candidates: list[SearchResult] = self._retriever.retrieve(
-                embedding, top_k=top_k
-            )
-            logger.info(
-                "Stream retrieval — %d candidates (top_k=%d)",
-                len(candidates),
-                top_k,
-            )
-
-            # -- 3. rerank ------------------------------------------------
+            # -- 2. rerank ------------------------------------------------
             reranked: list[SearchResult] = self._reranker.rerank(
                 question, candidates, top_k=rerank_top_k
             )
@@ -351,6 +457,13 @@ class QueryService:
                 len(reranked),
                 rerank_top_k,
             )
+
+            # -- 3. compress ------------------------------------------------
+            if self._compressor is not None:
+                try:
+                    reranked = self._compressor.compress(question, reranked)
+                except Exception:
+                    logger.exception("Stream compression failed — continuing")
 
             # -- 4. build prompt ------------------------------------------
             prompt = self._prompt_builder.build_prompt(question, reranked)

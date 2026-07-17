@@ -28,6 +28,19 @@ class EmbeddingService:
     ) -> list[float]:
         return self.model.encode(chunk.text)
 
+    def embed_queries(
+        self,
+        queries: list[str],
+    ) -> list[list[float]]:
+        """Encode multiple raw query strings in a single batch.
+
+        Returns
+        -------
+        list[list[float]]
+            One embedding vector per input query.
+        """
+        return self.model.encode_batch(queries)
+
     def embed_chunks(
         self,
         chunks: list[DocumentChunk],
