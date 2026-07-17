@@ -1,8 +1,15 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
 import faiss
 import numpy as np
 
 from app.ingestion.models import DocumentChunk, SearchResult
 from app.vectorstore.metadata_store import MetadataStore
+
+logger = logging.getLogger(__name__)
 
 
 class FAISSVectorStore:
@@ -12,8 +19,12 @@ class FAISSVectorStore:
         self,
         dimension: int,
     ) -> None:
-        self.index = faiss.IndexFlatIP(dimension)
+        self.index: faiss.Index = faiss.IndexFlatIP(dimension)
         self.metadata_store = MetadataStore()
+
+    def load_index(self, path: Path) -> None:
+        """Replace the in-memory index with one loaded from disk."""
+        self.index = faiss.read_index(str(path))
 
     def add(
         self,
@@ -59,9 +70,18 @@ class FAISSVectorStore:
             if idx == -1:
                 continue
 
+            try:
+                chunk = self.metadata_store.get(idx)
+            except KeyError:
+                logger.warning(
+                    "FAISS returned vector_id=%d but no chunk found in metadata store — skipping.",
+                    idx,
+                )
+                continue
+
             results.append(
                 SearchResult(
-                    chunk=self.metadata_store.get(idx),
+                    chunk=chunk,
                     score=float(score),
                 )
             )

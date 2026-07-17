@@ -3,7 +3,7 @@ from app.ingestion.models import DocumentChunk
 
 
 class EmbeddingService:
-    """Generates embeddings for document chunks."""
+    """Generates embeddings for document chunks and raw queries."""
 
     def __init__(self) -> None:
         self.model = BGEEmbeddingModel()
@@ -11,6 +11,16 @@ class EmbeddingService:
     @property
     def dimension(self) -> int:
         return self.model.dimension
+
+    def embed_query(self, text: str) -> list[float]:
+        """Encode a raw user query string.
+
+        Returns
+        -------
+        list[float]
+            Normalised embedding vector whose length equals ``dimension``.
+        """
+        return self.model.encode(text)
 
     def embed_chunk(
         self,
@@ -22,9 +32,5 @@ class EmbeddingService:
         self,
         chunks: list[DocumentChunk],
     ) -> list[list[float]]:
-        texts = [
-            chunk.text
-            for chunk in chunks
-        ]
-
+        texts = [chunk.text for chunk in chunks]
         return self.model.encode_batch(texts)
