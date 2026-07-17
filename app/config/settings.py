@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     enable_self_query: bool = True
     supported_metadata_fields: str = "filename,source,document_type,tags,extension"
 
+    # -- validation thresholds -------------------------------------------
+    validation_min_confidence_score: float = 0.6
+    validation_require_grounded: bool = True
+    validation_require_completeness: bool = True
+    validation_require_relevance: bool = True
+
     multi_query_system_prompt: str = (
         "You are a search query generator for a RAG system. "
         "Given a user question, generate multiple semantically diverse "

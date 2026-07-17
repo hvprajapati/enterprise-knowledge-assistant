@@ -27,6 +27,9 @@ class AgentState(TypedDict, total=False):
     # -- reflection output --------------------------------------------------
     reflection_result: dict[str, object]  # serialised ReflectionResult
 
+    # -- validation output --------------------------------------------------
+    validation_result: dict[str, object]  # serialised ValidationResult
+
     # -- metadata ----------------------------------------------------------
     error: str | None
     executed_nodes: list[str]

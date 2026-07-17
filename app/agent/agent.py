@@ -28,6 +28,8 @@ from app.agent.reflection.reflection import ReflectionEngine
 from app.agent.state import (
     AgentState as _AgentState,  # noqa: F401 — used in initial state construction
 )
+from app.agent.validation.validator import AnswerValidator, ValidationThresholds
+from app.config.settings import settings
 from app.llm.base import BaseLLM
 from app.query.service import QueryService
 from app.retrieval.query_rewriter import QueryRewriter
@@ -61,6 +63,14 @@ class EnterpriseKnowledgeAgent:
         _services["prompt_builder"] = query_service._prompt_builder
         _services["orchestrator"] = query_service._orchestrator
         _services["reflection_engine"] = ReflectionEngine(llm=llm)
+        _services["validator"] = AnswerValidator(
+            thresholds=ValidationThresholds(
+                min_confidence_score=settings.validation_min_confidence_score,
+                require_grounded=settings.validation_require_grounded,
+                require_completeness=settings.validation_require_completeness,
+                require_relevance=settings.validation_require_relevance,
+            )
+        )
 
         self._graph = build_graph().compile()
 
@@ -92,6 +102,7 @@ class EnterpriseKnowledgeAgent:
             "requires_rewrite": False,     # will be set by planner_node
             "execution_plan": {},          # will be set by planner_node
             "reflection_result": {},       # will be set by reflection_node
+            "validation_result": {},      # will be set by validation_node
         }
 
         logger.info(

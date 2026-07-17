@@ -23,7 +23,10 @@ The graph topology::
             generate_node           END
                    │
                    ▼
-            reflection_node          ← NEW: evaluates answer quality
+            reflection_node          ← evaluates answer quality
+                   │
+                   ▼
+            validation_node          ← NEW: deterministic quality gate
                    │
                    ▼
                   END
@@ -41,6 +44,7 @@ from app.agent.nodes import (
     reflection_node,
     retrieve_node,
     rewrite_node,
+    validation_node,
 )
 from app.agent.router import (
     route_after_retrieve,
@@ -62,6 +66,7 @@ def build_graph() -> StateGraph:
     graph.add_node("retrieve_node", retrieve_node)
     graph.add_node("generate_node", generate_node)
     graph.add_node("reflection_node", reflection_node)
+    graph.add_node("validation_node", validation_node)
 
     # -- edges -----------------------------------------------------------
     # START -> planner_node (always)
@@ -91,7 +96,10 @@ def build_graph() -> StateGraph:
     # generate_node -> reflection_node
     graph.add_edge("generate_node", "reflection_node")
 
-    # reflection_node -> END
-    graph.add_edge("reflection_node", END)
+    # reflection_node -> validation_node
+    graph.add_edge("reflection_node", "validation_node")
+
+    # validation_node -> END
+    graph.add_edge("validation_node", END)
 
     return graph

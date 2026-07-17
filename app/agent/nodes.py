@@ -13,6 +13,8 @@ from typing import Any
 from app.agent.reflection import ReflectionResult
 from app.agent.reflection.reflection import ReflectionEngine
 from app.agent.state import AgentState
+from app.agent.validation import ValidationResult
+from app.agent.validation.validator import AnswerValidator
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +209,45 @@ def reflection_node(state: AgentState) -> dict[str, Any]:
     return {
         "reflection_result": result.model_dump(),
         "executed_nodes": _track(state, "reflection"),
+    }
+
+
+def validation_node(state: AgentState) -> dict[str, Any]:
+    """Gate the answer using reflection scores and thresholds.
+
+    Reads
+    -----
+    reflection_result from state.
+
+    Sets
+    ----
+    validation_result : dict  (serialised ValidationResult)
+    executed_nodes     : appended ``"validation"``
+
+    On failure stores a pessimistic ``ValidationResult``
+    (passed=False, retry_required=True) so the graph does not
+    deliver a bad answer.
+    """
+    _record(state, "validation")
+    reflection_dict = state.get("reflection_result", {})
+
+    # Reconstruct the ReflectionResult from serialised dict
+    reflection = ReflectionResult.model_validate(reflection_dict)
+
+    validator: AnswerValidator = _get_service("validator")
+
+    result: ValidationResult = validator.validate(reflection)
+
+    logger.info(
+        "Validation node — passed=%s  retry=%s  severity=%s",
+        result.passed,
+        result.retry_required,
+        result.severity.value,
+    )
+
+    return {
+        "validation_result": result.model_dump(),
+        "executed_nodes": _track(state, "validation"),
     }
 
 
