@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     max_context_tokens: int = 4096
     redundancy_threshold: float = 0.92
 
+    # -- parent document retrieval ---------------------------------------
+    enable_parent_document_retrieval: bool = True
+    parent_window_size: int = 1
+    max_parent_chunks: int = 30
+
+    # -- self-query retrieval --------------------------------------------
+    enable_self_query: bool = True
+    supported_metadata_fields: str = "filename,source,document_type,tags,extension"
+
     multi_query_system_prompt: str = (
         "You are a search query generator for a RAG system. "
         "Given a user question, generate multiple semantically diverse "

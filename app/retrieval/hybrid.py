@@ -62,8 +62,10 @@ class HybridRetriever:
         query_embedding: list[float],
         query_text: str,
         top_k: int = 50,
+        *,
+        metadata_filters: dict[str, str | None] | None = None,
     ) -> list[SearchResult]:
-        """Run both retrievers and fuse results via RRF.
+        """Run both retrievers, apply filters, and fuse via RRF.
 
         Parameters
         ----------
@@ -73,19 +75,26 @@ class HybridRetriever:
             Raw text for BM25 keyword search.
         top_k:
             Number of fused results to return.
-
-        Returns
-        -------
-        list[SearchResult]
-            Fused results ordered by RRF score (descending).
+        metadata_filters:
+            Optional dict of ``{field: value}``.  When provided,
+            results from **both** retrievers are filtered before
+            RRF fusion.
         """
+        from app.retrieval.self_query.validator import apply_filters
+
         dense_ok = True
         sparse_ok = True
 
         # -- dense -------------------------------------------------------
         try:
             dense_results = self._dense.retrieve(query_embedding, top_k=self._dense_k)
-            logger.debug("Dense (FAISS) retrieved %d results", len(dense_results))
+            if metadata_filters:
+                dense_results = apply_filters(
+                    dense_results, metadata_filters
+                )
+            logger.debug(
+                "Dense (FAISS) retrieved %d results (filtered)", len(dense_results)
+            )
         except Exception:
             logger.exception("Dense retrieval failed")
             dense_results = []
@@ -94,7 +103,13 @@ class HybridRetriever:
         # -- sparse ------------------------------------------------------
         try:
             sparse_results = self._bm25.retrieve(query_text, top_k=self._bm25_k)
-            logger.debug("Sparse (BM25) retrieved %d results", len(sparse_results))
+            if metadata_filters:
+                sparse_results = apply_filters(
+                    sparse_results, metadata_filters
+                )
+            logger.debug(
+                "Sparse (BM25) retrieved %d results (filtered)", len(sparse_results)
+            )
         except Exception:
             logger.exception("Sparse retrieval failed")
             sparse_results = []

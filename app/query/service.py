@@ -41,9 +41,11 @@ from app.retrieval.bm25 import BM25Retriever
 from app.retrieval.context_compressor import BaseContextCompressor, SimilarityContextCompressor
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.multi_query import MultiQueryGenerator
+from app.retrieval.parent_document import ParentDocumentRetriever
 from app.retrieval.query_rewriter import QueryRewriter
 from app.retrieval.reranker import CrossEncoderReranker
 from app.retrieval.retriever import Retriever
+from app.retrieval.self_query.parser import SelfQueryParser
 from app.storage.repository import ChunkRepository
 from app.storage.sqlite import SQLiteConnection
 
@@ -90,6 +92,8 @@ class QueryService:
         multi_query: MultiQueryGenerator | None = None,
         hybrid_retriever: HybridRetriever | None = None,
         compressor: BaseContextCompressor | None = None,
+        parent_retriever: ParentDocumentRetriever | None = None,
+        self_query: SelfQueryParser | None = None,
     ) -> None:
         self._embed = embedding_service
         self._retriever = retriever
@@ -100,6 +104,8 @@ class QueryService:
         self._rewriter = rewriter
         self._multi_query = multi_query
         self._compressor = compressor
+        self._parent = parent_retriever
+        self._self_query = self_query
 
     # ------------------------------------------------------------------
     # factory
@@ -135,12 +141,25 @@ class QueryService:
         prompt_builder = PromptBuilder()
         llm = LLMFactory(settings).create()
         rewriter = QueryRewriter(llm) if settings.query_rewriter_enabled else None
+        self_query = SelfQueryParser(llm) if settings.enable_self_query else None
         multi_query = MultiQueryGenerator(llm) if settings.multi_query_enabled else None
         compressor = (
             SimilarityContextCompressor(embedding_service)
             if settings.enable_context_compression
             else None
         )
+
+        # Parent document expansion
+        parent_retriever: ParentDocumentRetriever | None = None
+        if settings.enable_parent_document_retrieval:
+            sqlite_p = SQLiteConnection(database_path)
+            conn_p = sqlite_p.connect()
+            try:
+                repo_p = ChunkRepository(conn_p)
+                parent_retriever = ParentDocumentRetriever(repo_p)
+                logger.info("Parent document retriever initialised")
+            finally:
+                conn_p.close()
 
         # Build hybrid retriever (dense + BM25) when enabled
         hybrid_retriever: HybridRetriever | None = None
@@ -172,6 +191,8 @@ class QueryService:
             multi_query=multi_query,
             hybrid_retriever=hybrid_retriever,
             compressor=compressor,
+            parent_retriever=parent_retriever,
+            self_query=self_query,
         )
 
     # ------------------------------------------------------------------
@@ -235,9 +256,17 @@ class QueryService:
             if self._rewriter is not None:
                 question = self._rewriter.rewrite(question)
 
+            # -- 0b. self-query parsing -----------------------------------
+            metadata_filters: dict[str, str | None] | None = None
+            if self._self_query is not None:
+                parsed = self._self_query.parse(question)
+                if parsed.metadata_filters:
+                    metadata_filters = parsed.metadata_filters
+                question = parsed.rewritten_query or question
+
             # -- 1. multi-query generation + embed + retrieve + merge -----
             candidates, retrieved_count = self._retrieve_multi(
-                question, top_k=top_k
+                question, top_k=top_k, metadata_filters=metadata_filters,
             )
 
             # -- 2. rerank ------------------------------------------------
@@ -253,7 +282,20 @@ class QueryService:
                 (time.monotonic() - t_rerank) * 1000,
             )
 
-            # -- 3. compress ------------------------------------------------
+            # -- 3. parent document expansion --------------------------------
+            if self._parent is not None:
+                t_parent = time.monotonic()
+                try:
+                    reranked = self._parent.expand(reranked)
+                    logger.info(
+                        "Parent expansion — %d chunks  latency=%.0fms",
+                        len(reranked),
+                        (time.monotonic() - t_parent) * 1000,
+                    )
+                except Exception:
+                    logger.exception("Parent expansion failed — continuing")
+
+            # -- 4. compress ------------------------------------------------
             if self._compressor is not None:
                 t_compress = time.monotonic()
                 try:
@@ -268,7 +310,7 @@ class QueryService:
                         "Context compression failed — continuing with original results"
                     )
 
-            # -- 4. build prompt ------------------------------------------
+            # -- 5. build prompt ------------------------------------------
             t_prompt = time.monotonic()
             prompt = self._prompt_builder.build_prompt(question, reranked)
             logger.info(
@@ -277,7 +319,7 @@ class QueryService:
                 (time.monotonic() - t_prompt) * 1000,
             )
 
-            # -- 5. LLM ---------------------------------------------------
+            # -- 6. LLM ---------------------------------------------------
             t_llm = time.monotonic()
             answer = self._llm.generate(prompt)
             llm_latency = (time.monotonic() - t_llm) * 1000
@@ -324,8 +366,13 @@ class QueryService:
         question: str,
         *,
         top_k: int = 50,
+        metadata_filters: dict[str, str | None] | None = None,
     ) -> tuple[list[SearchResult], int]:
-        """Run multi-query retrieval and return (merged_results, total_count)."""
+        """Run multi-query retrieval and return (merged_results, total_count).
+
+        When *metadata_filters* are provided they are forwarded to the
+        hybrid retriever and applied to both dense and sparse results.
+        """
         # -- generate queries --------------------------------------------
         queries: list[str]
         if self._multi_query is not None:
@@ -334,9 +381,10 @@ class QueryService:
             queries = [question]
 
         logger.info(
-            "Multi-query: %d queries generated (enabled=%s)",
+            "Multi-query: %d queries generated (enabled=%s  filters=%s)",
             len(queries),
             self._multi_query is not None,
+            bool(metadata_filters),
         )
 
         # -- batch-embed all queries -------------------------------------
@@ -355,7 +403,9 @@ class QueryService:
         total_before_merge = 0
         for i, (emb, query_text) in enumerate(zip(embeddings, queries, strict=True)):
             if self._hybrid is not None:
-                batch = self._hybrid.retrieve(emb, query_text, top_k=top_k)
+                batch = self._hybrid.retrieve(
+                    emb, query_text, top_k=top_k, metadata_filters=metadata_filters,
+                )
             else:
                 batch = self._retriever.retrieve(emb, top_k=top_k)
             results_per_query.append(batch)
@@ -445,8 +495,18 @@ class QueryService:
             if self._rewriter is not None:
                 question = self._rewriter.rewrite(question)
 
+            # -- 0b. self-query parsing -----------------------------------
+            metadata_filters: dict[str, str | None] | None = None
+            if self._self_query is not None:
+                parsed = self._self_query.parse(question)
+                if parsed.metadata_filters:
+                    metadata_filters = parsed.metadata_filters
+                question = parsed.rewritten_query or question
+
             # -- 1. multi-query generation + embed + retrieve + merge -----
-            candidates, _ = self._retrieve_multi(question, top_k=top_k)
+            candidates, _ = self._retrieve_multi(
+                question, top_k=top_k, metadata_filters=metadata_filters,
+            )
 
             # -- 2. rerank ------------------------------------------------
             reranked: list[SearchResult] = self._reranker.rerank(
@@ -458,18 +518,25 @@ class QueryService:
                 rerank_top_k,
             )
 
-            # -- 3. compress ------------------------------------------------
+            # -- 3. parent document expansion --------------------------------
+            if self._parent is not None:
+                try:
+                    reranked = self._parent.expand(reranked)
+                except Exception:
+                    logger.exception("Stream parent expansion failed — continuing")
+
+            # -- 4. compress ------------------------------------------------
             if self._compressor is not None:
                 try:
                     reranked = self._compressor.compress(question, reranked)
                 except Exception:
                     logger.exception("Stream compression failed — continuing")
 
-            # -- 4. build prompt ------------------------------------------
+            # -- 5. build prompt ------------------------------------------
             prompt = self._prompt_builder.build_prompt(question, reranked)
             logger.info("Stream prompt — %d chars", len(prompt))
 
-            # -- 5. stream LLM --------------------------------------------
+            # -- 6. stream LLM --------------------------------------------
             t_llm = time.monotonic()
             token_count = 0
 
