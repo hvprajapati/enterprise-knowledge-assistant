@@ -85,6 +85,29 @@ class Settings(BaseSettings):
     # -- retry -----------------------------------------------------------
     max_agent_retries: int = 2
 
+    # -- MCP server ------------------------------------------------------
+    enable_mcp: bool = True
+    mcp_server_name: str = "Enterprise Knowledge Assistant"
+    mcp_server_version: str = "0.1.0"
+
+    # -- MCP client ------------------------------------------------------
+    enable_mcp_client: bool = False
+    mcp_servers: str = "[]"  # JSON list of {name, command, args}
+    auto_reconnect: bool = True
+    heartbeat_interval: int = 30
+
+    # -- evaluation ------------------------------------------------------
+    enable_evaluation: bool = True
+    ragas_thresholds: str = (
+        '{"faithfulness":0.7,"answer_relevancy":0.6,'
+        '"context_precision":0.6,"context_recall":0.6}'
+    )
+    deepeval_thresholds: str = (
+        '{"hallucination":0.7,"faithfulness_de":0.7,'
+        '"answer_relevancy_de":0.6,"bias":0.8,"toxicity":0.9}'
+    )
+    report_output_directory: str = "reports"
+
     multi_query_system_prompt: str = (
         "You are a search query generator for a RAG system. "
         "Given a user question, generate multiple semantically diverse "

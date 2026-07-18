@@ -93,6 +93,42 @@ class EnterpriseKnowledgeAgent:
         _services["tool_registry"] = tool_registry
         _services["tool_executor"] = ToolExecutor(registry=tool_registry)
 
+        # -- MCP server --------------------------------------------------
+        from app.mcp import MCPRegistry, MCPServer, MCPServerConfig
+
+        mcp_config = MCPServerConfig(
+            name=settings.mcp_server_name,
+            version=settings.mcp_server_version,
+            enable=settings.enable_mcp,
+        )
+        mcp_registry = MCPRegistry(tool_registry=tool_registry)
+        _services["mcp_registry"] = mcp_registry
+        _services["mcp_server"] = MCPServer(
+            mcp_registry=mcp_registry, config=mcp_config
+        )
+
+        # -- MCP client (connect to external MCP servers) ----------------
+        import json as _json
+
+        from app.mcp.client import MCPConnectionManager
+        from app.mcp.client.models import MCPServerConnection
+
+        _services["mcp_connection_manager"] = MCPConnectionManager()
+
+        if settings.enable_mcp_client:
+            try:
+                servers_cfg = _json.loads(settings.mcp_servers)
+                for srv in servers_cfg:
+                    conn = MCPServerConnection(
+                        name=srv.get("name", "unknown"),
+                        command=srv.get("command", ""),
+                        args=srv.get("args", []),
+                        env=srv.get("env"),
+                    )
+                    _services["mcp_connection_manager"].add_server(conn)
+            except Exception:
+                logger.warning("Failed to parse MCP_SERVERS config.", exc_info=True)
+
         # -- multi-tool planning -----------------------------------------
         _services["tool_planner"] = MultiToolPlanner(
             available_tools=tool_registry.list_tools(),
