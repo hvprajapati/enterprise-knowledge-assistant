@@ -12,17 +12,21 @@ export default function App() {
     try {
       await api.health();
       setOnline(true);
-      const files = await api.listFiles();
-      setFileCount(Array.isArray(files) ? files.length : 0);
     } catch {
       setOnline(false);
     }
   };
 
+  // Health: every 30s (1 request). File count: every 2 min (1 request).
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 15000);
-    return () => clearInterval(id);
+    const healthId = setInterval(refresh, 30000);
+    const loadFiles = async () => {
+      try { const f = await api.listFiles(); setFileCount(Array.isArray(f) ? f.length : 0); } catch {}
+    };
+    loadFiles();
+    const filesId = setInterval(loadFiles, 120000);
+    return () => { clearInterval(healthId); clearInterval(filesId); };
   }, []);
 
   return (
