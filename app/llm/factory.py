@@ -23,6 +23,8 @@ _PROVIDER_REGISTRY: dict[str, str] = {
     "claude": "app.llm.claude.ClaudeLLM",
     "openai": "app.llm.openai.OpenAILLM",
     "gemini": "app.llm.gemini.GeminiLLM",
+    "deepseek": "app.llm.deepseek.DeepSeekLLM",
+    "kimi": "app.llm.kimi.KimiLLM",
 }
 
 

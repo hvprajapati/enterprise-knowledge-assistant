@@ -1,0 +1,192 @@
+"""Kimi (Moonshot AI) provider implementation.
+
+Kimi uses an OpenAI-compatible API, so this provider reuses the
+OpenAI Python client with a custom ``base_url``.
+
+Supported models:
+    - ``moonshot-v1-8k``   (8K context)
+    - ``moonshot-v1-32k``  (32K context)
+    - ``moonshot-v1-128k`` (128K context)
+    - ``kimi-latest``      (auto-updating alias)
+
+Set ``KIMI_API_KEY`` in ``.env`` and configure:
+    LLM_PROVIDER=kimi
+    LLM_MODEL_NAME=moonshot-v1-32k
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Iterator
+
+import openai
+from openai import OpenAI
+
+from app.config.settings import Settings
+from app.llm.base import BaseLLM
+from app.llm.exceptions import (
+    LLMAuthenticationError,
+    LLMNetworkError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
+
+logger = logging.getLogger(__name__)
+
+KIMI_BASE_URL = "https://api.moonshot.cn/v1"
+
+
+class KimiLLM(BaseLLM):
+    """LLM provider backed by Kimi (Moonshot AI) models.
+
+    Parameters
+    ----------
+    settings:
+        Application settings — ``kimi_api_key``, ``llm_model_name``,
+        ``llm_timeout``, ``llm_max_retries`` are read from here.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._model = settings.llm_model_name
+        self._timeout = float(settings.llm_timeout)
+        self._max_retries = settings.llm_max_retries
+
+        if not settings.kimi_api_key:
+            raise LLMAuthenticationError(
+                "Kimi API key is not configured. Set KIMI_API_KEY in .env."
+            )
+
+        self._client = OpenAI(
+            api_key=settings.kimi_api_key,
+            base_url=KIMI_BASE_URL,
+            timeout=self._timeout,
+            max_retries=self._max_retries,
+        )
+
+        logger.info(
+            "KimiLLM initialised — model=%s timeout=%.0fs max_retries=%d",
+            self._model,
+            self._timeout,
+            self._max_retries,
+        )
+
+    # ------------------------------------------------------------------
+    # public API
+    # ------------------------------------------------------------------
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> str:
+        started = time.monotonic()
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        logger.info(
+            "Kimi request started — model=%s max_tokens=%d", self._model, max_tokens
+        )
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except openai.AuthenticationError as exc:
+            raise LLMAuthenticationError(str(exc)) from exc
+        except openai.RateLimitError as exc:
+            raise LLMRateLimitError(str(exc)) from exc
+        except openai.APITimeoutError as exc:
+            raise LLMTimeoutError(str(exc)) from exc
+        except openai.APIConnectionError as exc:
+            raise LLMNetworkError(str(exc)) from exc
+        except openai.APIStatusError as exc:
+            raise LLMProviderError(
+                f"Kimi returned HTTP {exc.status_code}: {exc.message}"
+            ) from exc
+        except Exception as exc:
+            raise LLMProviderError(str(exc)) from exc
+
+        elapsed = time.monotonic() - started
+
+        usage = response.usage
+        prompt_tokens = usage.prompt_tokens if usage else "?"
+        completion_tokens = usage.completion_tokens if usage else "?"
+
+        logger.info(
+            "Kimi request completed — latency=%.2fs prompt_tokens=%s completion_tokens=%s",
+            elapsed,
+            prompt_tokens,
+            completion_tokens,
+        )
+
+        return response.choices[0].message.content or ""
+
+    # ------------------------------------------------------------------
+    # streaming
+    # ------------------------------------------------------------------
+
+    def stream_generate(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        started = time.monotonic()
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        logger.info(
+            "Kimi stream started — model=%s max_tokens=%d", self._model, max_tokens
+        )
+
+        token_count = 0
+        try:
+            stream = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    token_count += 1
+                    yield delta.content
+        except openai.AuthenticationError as exc:
+            raise LLMAuthenticationError(str(exc)) from exc
+        except openai.RateLimitError as exc:
+            raise LLMRateLimitError(str(exc)) from exc
+        except openai.APITimeoutError as exc:
+            raise LLMTimeoutError(str(exc)) from exc
+        except openai.APIConnectionError as exc:
+            raise LLMNetworkError(str(exc)) from exc
+        except openai.APIStatusError as exc:
+            raise LLMProviderError(
+                f"Kimi returned HTTP {exc.status_code}: {exc.message}"
+            ) from exc
+        except Exception as exc:
+            raise LLMProviderError(str(exc)) from exc
+
+        elapsed = time.monotonic() - started
+        logger.info(
+            "Kimi stream finished — latency=%.2fs output_chunks=%d",
+            elapsed,
+            token_count,
+        )
