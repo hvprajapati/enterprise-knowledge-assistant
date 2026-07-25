@@ -26,7 +26,7 @@ class Settings(BaseSettings):
         "Inform the user that no relevant information is available "
         "and suggest they try a different question or upload additional documents."
     )
-    prompt_max_context_chunks: int = 20
+    prompt_max_context_chunks: int = 5  # fewer chunks = fewer input tokens = cheaper
 
     # -- query rewriting -------------------------------------------------
     query_rewriter_enabled: bool = False  # off: saves 1 LLM call per query
@@ -133,8 +133,8 @@ class Settings(BaseSettings):
     llm_model_name: str = "deepseek-v4-pro"
     llm_temperature: float = 0.0
     llm_max_tokens: int = 1024
-    llm_timeout: int = 60
-    llm_max_retries: int = 3
+    llm_timeout: int = 120
+    llm_max_retries: int = 0  # 0 = no retries, saves API credits
 
     claude_api_key: str = ""
     openai_api_key: str = ""
