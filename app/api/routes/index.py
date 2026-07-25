@@ -117,6 +117,7 @@ def _run_indexing(
     index_path: str,
 ) -> None:
     """Execute the indexing pipeline and update job status."""
+    from app.api.dependencies import invalidate_query_service_cache
     from app.jobs.manager import job_manager as jm
 
     jm.transition_to_running(job_id)
@@ -134,6 +135,8 @@ def _run_indexing(
             chunks_created=stats.chunks_created,
             embeddings_generated=stats.embeddings_generated,
         )
+        # Drop the cached QueryService so the next request picks up new data
+        invalidate_query_service_cache()
 
     except Exception as exc:
         logger.exception("Background indexing failed — id=%s", job_id)

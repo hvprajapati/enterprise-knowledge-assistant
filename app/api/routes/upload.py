@@ -197,6 +197,7 @@ def _run_indexing_for_upload(
     index_path: str,
 ) -> None:
     """Rebuild the FAISS index from *directory* and update job status."""
+    from app.api.dependencies import invalidate_query_service_cache
     from app.jobs.manager import job_manager as jm
 
     jm.transition_to_running(job_id)
@@ -214,6 +215,8 @@ def _run_indexing_for_upload(
             chunks_created=stats.chunks_created,
             embeddings_generated=stats.embeddings_generated,
         )
+        # Drop the cached QueryService so the next request picks up new data
+        invalidate_query_service_cache()
     except Exception as exc:
         logger.exception("Upload indexing failed — job_id=%s", job_id)
         jm.transition_to_failed(job_id, str(exc))

@@ -42,6 +42,8 @@ class DocumentChunk(BaseModel):
 
     metadata: DocumentMetadata
 
+    content_hash: str | None = None
+
 
 class SearchResult(BaseModel):
     chunk: DocumentChunk

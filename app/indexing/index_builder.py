@@ -32,8 +32,15 @@ class IndexBuilder:
         repository: ChunkRepository,
         *,
         batch_size: int = 32,
+        chunk_size: int = 800,
+        chunk_overlap: int = 100,
+        min_chunk_size: int = 10,
     ) -> None:
-        self.ingestion = IngestionService()
+        self.ingestion = IngestionService(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            min_chunk_size=min_chunk_size,
+        )
         self.embedding = EmbeddingService()
         self.repository = repository
         self.batch_size = batch_size
@@ -53,6 +60,9 @@ class IndexBuilder:
     ) -> IndexingStats:
         """Run the full indexing pipeline.
 
+        Files whose content hash is already present in the database
+        are skipped (duplicate detection).
+
         Returns
         -------
         IndexingStats
@@ -60,9 +70,26 @@ class IndexBuilder:
         """
         stats = IndexingStats()
 
+        # Pre-load known content hashes for O(1) dedup
+        known_hashes = self.repository.get_content_hashes()
         chunk_buffer: list[DocumentChunk] = []
 
         for file_path in self._discover_files(input_folder):
+            # -- duplicate detection ------------------------------------
+            try:
+                file_hash = IngestionService.compute_content_hash(file_path)
+            except OSError:
+                logger.warning("Cannot hash %s — skipping", file_path)
+                continue
+
+            if file_hash in known_hashes:
+                logger.info("Skipping duplicate: %s (hash=%s)", file_path.name, file_hash[:12])
+                stats.files_processed += 1  # counted but not re-ingested
+                continue
+
+            known_hashes.add(file_hash)
+
+            # -- ingest -------------------------------------------------
             try:
                 chunks = self.ingestion.ingest(file_path)
             except Exception:

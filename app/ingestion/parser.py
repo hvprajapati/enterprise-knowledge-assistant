@@ -1,3 +1,4 @@
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from app.ingestion.models import (
     DocumentPage,
     ParsedDocument,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BaseParser(ABC):
@@ -30,14 +33,33 @@ def build_metadata(file_path: Path) -> DocumentMetadata:
 
 class PDFParser(BaseParser):
     def parse(self, file_path: Path) -> ParsedDocument:
+        pages: list[DocumentPage] = []
+        errors: list[tuple[int, str]] = []
+
         with fitz.open(file_path) as pdf:
-            pages = [
-                DocumentPage(
-                    page_number=index + 1,
-                    text=page.get_text("text"),
-                )
-                for index, page in enumerate(pdf)
-            ]
+            for index, page in enumerate(pdf, start=1):
+                try:
+                    text = page.get_text("text")
+                except Exception as exc:
+                    errors.append((index, str(exc)))
+                    logger.warning(
+                        "PDF page %d extraction failed in %s: %s",
+                        index, file_path.name, exc,
+                    )
+                    continue
+
+                pages.append(DocumentPage(page_number=index, text=text))
+
+        if not pages and errors:
+            raise RuntimeError(
+                f"All {len(errors)} pages failed to parse in {file_path.name}"
+            )
+
+        if errors:
+            logger.warning(
+                "PDF %s: %d/%d pages had extraction errors",
+                file_path.name, len(errors), len(pages) + len(errors),
+            )
 
         return ParsedDocument(
             pages=pages,
@@ -62,9 +84,17 @@ class DOCXParser(BaseParser):
         )
 
 
-class TXTParser(BaseParser):
+class TextFileParser(BaseParser):
+    """Parser for plain-text formats (``.txt``, ``.md``, ``.rst``, etc.).
+
+    Reads the file as UTF-8 with fallback encoding attempts for
+    non-UTF-8 files.
+    """
+
+    _FALLBACK_ENCODINGS: tuple[str, ...] = ("utf-8", "latin-1", "cp1252")
+
     def parse(self, file_path: Path) -> ParsedDocument:
-        text = file_path.read_text(encoding="utf-8")
+        text = self._read_with_fallback(file_path)
 
         return ParsedDocument(
             pages=[
@@ -76,17 +106,30 @@ class TXTParser(BaseParser):
             metadata=build_metadata(file_path),
         )
 
+    def _read_with_fallback(self, file_path: Path) -> str:
+        """Try UTF-8 first, then fall back through common encodings."""
+        for encoding in self._FALLBACK_ENCODINGS:
+            try:
+                return file_path.read_text(encoding=encoding)
+            except (UnicodeDecodeError, UnicodeError):
+                continue
 
-class MarkdownParser(BaseParser):
-    def parse(self, file_path: Path) -> ParsedDocument:
-        text = file_path.read_text(encoding="utf-8")
-
-        return ParsedDocument(
-            pages=[
-                DocumentPage(
-                    page_number=1,
-                    text=text,
-                )
-            ],
-            metadata=build_metadata(file_path),
+        # Last resort: read as bytes and decode with replacement
+        raw = file_path.read_bytes()
+        logger.warning(
+            "Using replacement-character decoding for %s", file_path.name,
         )
+        return raw.decode("utf-8", errors="replace")
+
+
+# ------------------------------------------------------------------
+# backward-compatibility aliases (keeps existing imports working)
+# ------------------------------------------------------------------
+
+
+class TXTParser(TextFileParser):
+    """Legacy alias — use ``TextFileParser`` directly."""
+
+
+class MarkdownParser(TextFileParser):
+    """Legacy alias — use ``TextFileParser`` directly."""

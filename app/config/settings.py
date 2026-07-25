@@ -144,10 +144,19 @@ class Settings(BaseSettings):
     index_storage_path: str = "storage/index.faiss"
     database_storage_path: str = "storage/metadata.db"
 
+    # -- chunking --------------------------------------------------------
+    chunk_size: int = 800
+    chunk_overlap: int = 100
+    min_chunk_size: int = 10  # skip chunks shorter than this
+
     # -- upload ---------------------------------------------------------
     upload_directory: str = "data/uploads"
     max_upload_size: int = 52_428_800  # 50 MiB
     supported_upload_extensions: str = ".pdf,.docx,.txt,.md"
+
+    # -- authentication --------------------------------------------------
+    require_auth: bool = False
+    api_key: str = ""  # set via .env; empty = auth disabled
 
     model_config = SettingsConfigDict(
         env_file=".env",

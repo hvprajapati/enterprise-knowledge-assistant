@@ -2,10 +2,14 @@
 
 Builds a BM25 index from document chunks so that keyword-based
 retrieval can complement dense (FAISS) retrieval in a hybrid pipeline.
+
+Includes a process-level cache so the BM25 index is built once and
+reused across requests.  Invalidate the cache after re-indexing.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import TYPE_CHECKING
 
@@ -15,6 +19,54 @@ if TYPE_CHECKING:
     from app.ingestion.models import DocumentChunk, SearchResult
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# process-level cache (issue #37)
+# ------------------------------------------------------------------
+
+_cached_bm25: BM25Retriever | None = None
+_cached_fingerprint: str | None = None
+
+
+def get_bm25(
+    chunks: list[DocumentChunk],
+    *,
+    force_rebuild: bool = False,
+) -> BM25Retriever:
+    """Return a cached ``BM25Retriever``, rebuilding only when chunks change.
+
+    The fingerprint is a fast hash of chunk IDs + lengths — not the
+    full text — so it's cheap to compute on every call.
+    """
+    global _cached_bm25, _cached_fingerprint
+
+    fp = _fingerprint(chunks)
+
+    if (not force_rebuild) and _cached_bm25 is not None and _cached_fingerprint == fp:
+        logger.debug("BM25 cache hit — %d documents", len(chunks))
+        return _cached_bm25
+
+    logger.info("Building BM25 index — %d documents", len(chunks))
+    _cached_bm25 = BM25Retriever(chunks)
+    _cached_fingerprint = fp
+    return _cached_bm25
+
+
+def invalidate_bm25_cache() -> None:
+    """Drop the cached BM25 index."""
+    global _cached_bm25, _cached_fingerprint
+    _cached_bm25 = None
+    _cached_fingerprint = None
+    logger.info("BM25 cache invalidated")
+
+
+def _fingerprint(chunks: list[DocumentChunk]) -> str:
+    """Fast fingerprint from chunk identity — O(n) but avoids hashing text."""
+    h = hashlib.sha1()
+    for c in chunks:
+        h.update(str(c.chunk_id).encode())
+        h.update(str(len(c.text)).encode())
+    return h.hexdigest()
 
 
 class BM25Retriever:

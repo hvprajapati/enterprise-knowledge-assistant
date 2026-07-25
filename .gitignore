@@ -34,9 +34,12 @@ Thumbs.db
 # Logs
 *.log
 
-# Local Storage
-data/
-storage/
+# Local Storage (data directories at project root)
+/data/
+/storage/
+
+# Reports (generated artifacts — keep local)
+reports/
 
 # Build
 build/
