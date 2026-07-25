@@ -42,3 +42,6 @@ storage/
 build/
 dist/
 *.egg-info/
+
+# Claude Code (local)
+.claude/settings.local.json
