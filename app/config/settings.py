@@ -139,8 +139,8 @@ class Settings(BaseSettings):
     claude_api_key: str = ""
     openai_api_key: str = ""
     gemini_api_key: str = ""
-    deepseek_api_key: str = "sk-c441ca3551f945499ac9181214d33b75"
-    kimi_api_key: str = "sk-kimi-w8MvT8R9esroesUMhftPfqLzjZd6U1SBm00N44VQ8nnbnrPdgZr1F3uOybI7xNUc"
+    deepseek_api_key: str = ""
+    kimi_api_key: str = ""
 
     # -- storage paths --------------------------------------------------
     index_storage_path: str = "storage/index.faiss"
