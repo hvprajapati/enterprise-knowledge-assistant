@@ -48,3 +48,7 @@ dist/
 
 # Claude Code (local)
 .claude/settings.local.json
+
+# Node / React
+node_modules/
+frontend/dist/
