@@ -4,7 +4,7 @@ import { api } from '../lib/api';
 import { useOutletContext } from 'react-router-dom';
 
 export default function ConsolePage() {
-  const { online } = useOutletContext();
+  const { online, checkHealth, loadFileCount } = useOutletContext();
 
   // Index
   const [directory, setDirectory] = useState('data/uploads');
@@ -48,6 +48,8 @@ export default function ConsolePage() {
 
   const loadSys = async () => {
     try {
+      await checkHealth();
+      await loadFileCount();
       const [health, files] = await Promise.all([
         api.health(),
         api.listFiles(),

@@ -4,12 +4,15 @@ import { Send, Sparkles, FileText, Clock, Trash2 } from 'lucide-react';
 import { api } from '../lib/api';
 
 export default function ChatPage() {
-  const { online } = useOutletContext();
+  const { online, checkHealth } = useOutletContext();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState('');
   const bottomRef = useRef(null);
+
+  // Single health check on mount — no polling
+  useEffect(() => { checkHealth(); }, []);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, streaming]);
 
