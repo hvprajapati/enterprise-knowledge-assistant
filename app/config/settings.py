@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     prompt_max_context_chunks: int = 20
 
     # -- query rewriting -------------------------------------------------
-    query_rewriter_enabled: bool = True
+    query_rewriter_enabled: bool = False  # off: saves 1 LLM call per query
     query_rewriter_system_prompt: str = (
         "You are a query rewriter for a RAG system. "
         "Your job is to rewrite the user's question to improve retrieval quality.\n\n"
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     )
 
     # -- multi-query retrieval ------------------------------------------
-    multi_query_enabled: bool = True
+    multi_query_enabled: bool = False  # off: saves 1 LLM call per query
     multi_query_max_variants: int = 4
 
     # -- hybrid retrieval ------------------------------------------------
@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     rrf_k: int = 60
 
     # -- context compression ---------------------------------------------
-    enable_context_compression: bool = True
+    enable_context_compression: bool = False  # off: local model, skip for speed
     max_context_tokens: int = 4096
     redundancy_threshold: float = 0.92
 
@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     max_parent_chunks: int = 30
 
     # -- self-query retrieval --------------------------------------------
-    enable_self_query: bool = True
+    enable_self_query: bool = False  # off: saves 1 LLM call per query
     supported_metadata_fields: str = "filename,source,document_type,tags,extension"
 
     # -- validation thresholds -------------------------------------------
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     validation_require_relevance: bool = True
 
     # -- retry -----------------------------------------------------------
-    max_agent_retries: int = 2
+    max_agent_retries: int = 0  # off: no retry = no extra LLM calls
 
     # -- MCP server ------------------------------------------------------
     enable_mcp: bool = True
