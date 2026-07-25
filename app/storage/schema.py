@@ -1,11 +1,14 @@
+import logging
 import sqlite3
+
+logger = logging.getLogger(__name__)
 
 
 def create_schema(connection: sqlite3.Connection) -> None:
-    """Creates the database schema for chunk metadata.
+    """Creates or migrates the database schema for chunk metadata.
 
-    Includes performance-critical indexes and WAL journal mode
-    for concurrent read/write safety.
+    Safe to call on an existing database — missing columns are added
+    via ALTER TABLE, and indexes are created when absent.
     """
 
     # --- WAL mode: readers don't block writers -------------------------
@@ -43,6 +46,9 @@ def create_schema(connection: sqlite3.Connection) -> None:
         """
     )
 
+    # --- migrations: add columns that may not exist in older DBs -------
+    _add_column_if_missing(connection, "chunks", "content_hash", "TEXT")
+
     # --- indexes (perf-critical for query-time lookups) ----------------
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_chunks_document_id "
@@ -58,3 +64,23 @@ def create_schema(connection: sqlite3.Connection) -> None:
     )
 
     connection.commit()
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    col_type: str,
+) -> None:
+    """Add *column* to *table* if it doesn't already exist.
+
+    SQLite has no ``ADD COLUMN IF NOT EXISTS``, so we inspect
+    ``PRAGMA table_info`` before running ``ALTER TABLE``.
+    """
+    existing = {
+        row[1]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in existing:
+        logger.info("Migrating schema: adding %s.%s %s", table, column, col_type)
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")

@@ -129,8 +129,8 @@ class Settings(BaseSettings):
     )
 
     # -- LLM ------------------------------------------------------------
-    llm_provider: str = "openai"
-    llm_model_name: str = "gpt-4o"
+    llm_provider: str = "deepseek"
+    llm_model_name: str = "deepseek-v4-pro"
     llm_temperature: float = 0.0
     llm_max_tokens: int = 1024
     llm_timeout: int = 60
@@ -139,8 +139,8 @@ class Settings(BaseSettings):
     claude_api_key: str = ""
     openai_api_key: str = ""
     gemini_api_key: str = ""
-    deepseek_api_key: str = ""
-    kimi_api_key: str = ""
+    deepseek_api_key: str = "sk-c441ca3551f945499ac9181214d33b75"
+    kimi_api_key: str = "sk-kimi-w8MvT8R9esroesUMhftPfqLzjZd6U1SBm00N44VQ8nnbnrPdgZr1F3uOybI7xNUc"
 
     # -- storage paths --------------------------------------------------
     index_storage_path: str = "storage/index.faiss"
